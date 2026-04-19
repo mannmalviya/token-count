@@ -5,6 +5,7 @@
 // test. All IO happens in storage.ts.
 
 import type { UsageRecord } from "./types.js";
+import { estimateRecordCost } from "./pricing.js";
 
 // ---------------------------------------------------------------------------
 // Output shapes.
@@ -17,6 +18,11 @@ export interface TotalsBlock {
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
   total_tokens: number;
+  /**
+   * Estimated USD cost summed per-record using the record's model rate
+   * (see pricing.ts). Always populated; stats CLI decides whether to show it.
+   */
+  total_cost_usd: number;
   record_count: number;
 }
 
@@ -109,6 +115,7 @@ function emptyTotals(): TotalsBlock {
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
     total_tokens: 0,
+    total_cost_usd: 0,
     record_count: 0,
   };
 }
@@ -125,6 +132,9 @@ function addInto(acc: TotalsBlock, r: UsageRecord): void {
     r.output_tokens +
     r.cache_creation_input_tokens +
     r.cache_read_input_tokens;
+  // Cost uses per-record rates (model-aware) so a daily bucket with mixed
+  // Opus/Sonnet traffic adds up correctly.
+  acc.total_cost_usd += estimateRecordCost(r);
   acc.record_count += 1;
 }
 

@@ -107,7 +107,8 @@ async function main() {
     .option("--by <dim>", "Group by: day, model, or project", "day")
     .option("--since <iso>", "Include only records on/after this ISO date")
     .option("--until <iso>", "Include only records before this ISO date")
-    .action((opts: { by?: string; since?: string; until?: string }) => {
+    .option("--cost", "Include an estimated USD cost column (rates from core/pricing.ts)")
+    .action((opts: { by?: string; since?: string; until?: string; cost?: boolean }) => {
       const by = opts.by as GroupBy;
       if (!["day", "model", "project"].includes(by)) {
         console.error(`--by must be one of: day, model, project (got "${opts.by}")`);
@@ -117,6 +118,7 @@ async function main() {
         by,
         since: opts.since ? new Date(opts.since) : undefined,
         until: opts.until ? new Date(opts.until) : undefined,
+        cost: opts.cost,
       });
       process.stdout.write(output);
     });

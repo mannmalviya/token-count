@@ -22,6 +22,8 @@ export interface StatsOptions {
   by: GroupBy;
   since?: Date;
   until?: Date;
+  /** Show an estimated USD cost column. See core/pricing.ts for rates. */
+  cost?: boolean;
 }
 
 export interface StatsResult {
@@ -47,13 +49,27 @@ export function runStats(opts: StatsOptions): StatsResult {
 
   const keyHeader =
     opts.by === "day" ? "Day" : opts.by === "model" ? "Model" : "Project";
-  const header = [keyHeader, "Input", "Output", "Cache create", "Cache read", "Total", "Turns"];
+  const baseHeader = [keyHeader, "Input", "Output", "Cache create", "Cache read", "Total", "Turns"];
+  // Column label uses "API rate" rather than just "Cost" because Claude Code
+  // subscriptions are flat-rate — this number is what the same tokens would
+  // cost if billed per-token via the API, not what the user actually pays.
+  const header = opts.cost ? [...baseHeader, "API rate (USD)"] : baseHeader;
 
-  const body = summary.groups.map((g) => row(g.key, g.totals));
-  const footer = row("all", summary.totals);
+  const body = summary.groups.map((g) => row(g.key, g.totals, opts.cost));
+  const footer = row("all", summary.totals, opts.cost);
+
+  // When --cost is active, print a one-line reminder under the totals so the
+  // number doesn't look like a bill. See pricing.ts for the rate source.
+  const costNote = opts.cost
+    ? "\nAPI rate = Anthropic per-token API pricing. Claude Code subscriptions are flat-rate; this is the equivalent retail cost, not your bill.\n"
+    : "";
 
   const output =
-    renderTable(header, body) + "\n" + renderTable(["Totals", ...header.slice(1)], [footer]) + "\n";
+    renderTable(header, body) +
+    "\n" +
+    renderTable(["Totals", ...header.slice(1)], [footer]) +
+    costNote +
+    "\n";
 
   return { summary, output };
 }
@@ -62,8 +78,8 @@ export function runStats(opts: StatsOptions): StatsResult {
 // helpers
 // ---------------------------------------------------------------------------
 
-function row(key: string, t: TotalsBlock): string[] {
-  return [
+function row(key: string, t: TotalsBlock, withCost?: boolean): string[] {
+  const base = [
     key,
     fmt(t.input_tokens),
     fmt(t.output_tokens),
@@ -72,12 +88,18 @@ function row(key: string, t: TotalsBlock): string[] {
     fmt(t.total_tokens),
     String(t.record_count),
   ];
+  return withCost ? [...base, fmtCost(t.total_cost_usd)] : base;
 }
 
 // Format ints with en-US thousands separators. Fixed locale so test assertions
 // don't depend on the machine's locale.
 function fmt(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+// USD with two decimals and thousands separators — "$1,234.56".
+function fmtCost(usd: number): string {
+  return "$" + usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 /**

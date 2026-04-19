@@ -7,3 +7,4 @@ export * from "./paths.js";
 export * from "./transcript.js";
 export * from "./storage.js";
 export * from "./aggregate.js";
+export * from "./backfill.js";

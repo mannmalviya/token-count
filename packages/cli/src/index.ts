@@ -11,7 +11,7 @@ import { Command } from "commander";
 import { runInit } from "./init.js";
 import { runHook } from "./hook.js";
 import { runStats } from "./stats.js";
-import type { GroupBy } from "@token-count/core";
+import { backfillFromClaudeProjects, type GroupBy } from "@token-count/core";
 
 // ---------------------------------------------------------------------------
 // Main
@@ -29,9 +29,10 @@ async function main() {
   // -------------------------------------------------------------------------
   program
     .command("init")
-    .description("Install the Stop hook into Claude Code's settings.")
+    .description("Install the Stop hook into Claude Code's settings, and backfill existing transcripts.")
     .option("--project", "Write to .claude/settings.json in cwd instead of the global ~/.claude/settings.json")
-    .action((opts: { project?: boolean }) => {
+    .option("--no-backfill", "Skip importing token usage from existing Claude transcripts")
+    .action((opts: { project?: boolean; backfill?: boolean }) => {
       // Build the absolute command Claude Code should invoke. We resolve any
       // symlinks (pnpm link creates one) so the settings file contains the
       // real path to this binary.
@@ -51,6 +52,17 @@ async function main() {
         console.log(`Installed token-count Stop hook -> ${result.settingsPath}`);
       }
       console.log(`Data directory: ${path.join(process.env.TOKEN_COUNT_DIR ?? path.join(os.homedir(), ".token-count"))}`);
+
+      // By default, also import every assistant turn already in
+      // ~/.claude/projects/*/*.jsonl. Dedupe-by-turn_uuid means re-running
+      // is safe. --no-backfill skips this for users who only want fresh data.
+      if (opts.backfill !== false) {
+        const projectsDir = path.join(os.homedir(), ".claude", "projects");
+        const bf = backfillFromClaudeProjects({ projectsDir });
+        console.log(
+          `Backfill: scanned ${bf.sessionsScanned} sessions, added ${bf.appended} records (${bf.skipped} already recorded).`,
+        );
+      }
     });
 
   // -------------------------------------------------------------------------
@@ -107,6 +119,21 @@ async function main() {
         until: opts.until ? new Date(opts.until) : undefined,
       });
       process.stdout.write(output);
+    });
+
+  // -------------------------------------------------------------------------
+  // backfill — import history from ~/.claude/projects/ on demand.
+  // Safe to re-run; dedupes against existing records by turn_uuid.
+  // -------------------------------------------------------------------------
+  program
+    .command("backfill")
+    .description("Import all assistant turns from existing Claude Code transcripts.")
+    .action(() => {
+      const projectsDir = path.join(os.homedir(), ".claude", "projects");
+      const bf = backfillFromClaudeProjects({ projectsDir });
+      console.log(
+        `Scanned ${bf.sessionsScanned} sessions, added ${bf.appended} records (${bf.skipped} already recorded).`,
+      );
     });
 
   await program.parseAsync(process.argv);

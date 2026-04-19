@@ -1,0 +1,27 @@
+{
+  "name": "token-count",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local-first Claude Code token usage tracker (monorepo root).",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "dev": "pnpm -r --parallel dev",
+    "clean": "pnpm -r exec rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4",
+    "@vitest/coverage-v8": "^2.1.4",
+    "tsup": "^8.3.5",
+    "@types/node": "^20.17.6"
+  },
+  "pnpm": {
+    "//": "esbuild needs to run a postinstall script to place its native binary. It's a dev-only dep (used by tsup + the vscode bundler), so approving it here is safe.",
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

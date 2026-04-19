@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output — every package emits into its own `dist/`.
+dist/
+*.tsbuildinfo
+
+# Test + coverage artifacts
+coverage/
+.vitest-cache/
+
+# VSCode extension packaging output
+*.vsix
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Local env overrides (never commit secrets or machine-specific paths)
+.env
+.env.local
+
+# pnpm-specific
+.pnpm-store/

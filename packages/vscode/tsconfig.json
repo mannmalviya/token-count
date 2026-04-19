@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node", "vscode"],
+    // VSCode extensions currently load as CommonJS. We still author in TS/ESM
+    // and let esbuild produce a single .cjs bundle.
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "tests", "node_modules"]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@token-count/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "token-count CLI — init, hook, stats.",
+  "type": "module",
+  "bin": {
+    "token-count": "./bin/token-count.js"
+  },
+  "files": ["bin", "dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean",
+    "dev": "tsup src/index.ts --format esm --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@token-count/core": "workspace:*",
+    "commander": "^12.1.0"
+  }
+}

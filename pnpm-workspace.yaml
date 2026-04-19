@@ -1,0 +1,5 @@
+# pnpm workspaces config.
+# Every directory matched by these globs is treated as its own package.
+# The root package.json is "private": true and never published.
+packages:
+  - "packages/*"

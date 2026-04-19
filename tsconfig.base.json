@@ -1,0 +1,37 @@
+{
+  // Shared TypeScript settings that every package extends via:
+  //   { "extends": "../../tsconfig.base.json", ... }
+  //
+  // Each package adds its own "include", "outDir", and any package-specific
+  // overrides. Keeping the common bits here avoids drift between packages.
+  "compilerOptions": {
+    // Emit modern JS. Node 18+ supports ES2022 natively.
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    // Strictness: catch bugs at compile time instead of in production.
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+
+    // Interop so `import fs from "node:fs"` works like in ESM docs.
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Skip type-checking node_modules — faster builds, no false positives
+    // from third-party types we don't control.
+    "skipLibCheck": true,
+
+    // Emit .d.ts files next to .js so other packages can consume the types.
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+
+    // Let vitest + tsup resolve package.json "exports" correctly.
+    "resolveJsonModule": true,
+    "isolatedModules": true
+  }
+}

@@ -1,1 +1,327 @@
 # token-count
+
+A local-first tracker for [Claude Code](https://claude.com/claude-code) token
+usage. Every time Claude finishes a response, a `Stop` hook records the turn's
+token counts to a JSONL file on your disk. A CLI and a VSCode extension read
+that file to show totals, breakdowns, and cost estimates.
+
+No cloud. No account. No telemetry. All data lives under `~/.token-count/`.
+
+---
+
+## Features
+
+- **Per-turn recording** — every assistant response is captured with its
+  `input`, `output`, `cache_creation`, and `cache_read` token counts, plus the
+  model and working directory.
+- **Backfill from history** — `token-count init` and `token-count backfill`
+  can import every assistant turn already sitting in
+  `~/.claude/projects/*/*.jsonl`, so you get your full history the first time
+  you install.
+- **`token-count stats`** — terminal table grouped by day, model, or project,
+  with optional `--since`/`--until` windows and an optional `--cost` column
+  (USD estimate using published Anthropic rates).
+- **VSCode status bar** — live "today's total" tokens in the left status bar,
+  updated automatically whenever a new turn is recorded.
+- **VSCode dashboard** — webview panel with a 30-day time-series chart plus
+  all-time / week / today totals and breakdowns by model and project.
+- **Deduped and append-only** — records are keyed by the transcript event's
+  `uuid`, so re-running backfill or restarting the hook can never
+  double-count.
+- **Safe by construction** — the hook always exits 0, so a bug in
+  `token-count` can't ever block your Claude Code session.
+
+---
+
+## Setup
+
+### 1. Install dependencies and build
+
+```bash
+pnpm install
+pnpm -r build
+```
+
+### 2. Link the CLI globally
+
+This puts `token-count` on your `PATH`:
+
+```bash
+pnpm --filter @token-count/cli link --global
+```
+
+### 3. Install the Stop hook
+
+This writes an entry into `~/.claude/settings.json` and, by default,
+backfills every existing transcript under `~/.claude/projects/`:
+
+```bash
+token-count init
+```
+
+Options:
+
+- `--project` — install the hook in the current repo's
+  `.claude/settings.json` instead of the global settings.
+- `--no-backfill` — skip the initial import; only record turns going forward.
+
+Re-running `token-count init` is idempotent; it prints a note and exits if
+the hook is already installed.
+
+### 4. (Optional) Install the VSCode extension
+
+From the repo root:
+
+```bash
+pnpm --filter token-count-vscode build
+```
+
+Then in VSCode, run **Developer: Install Extension from Location...** and
+point it at `packages/vscode`. Alternatively, open `packages/vscode` in VSCode
+and press `F5` to launch an Extension Development Host.
+
+---
+
+## Usage
+
+### CLI
+
+```bash
+# Totals + daily breakdown (default grouping)
+token-count stats
+
+# Group by model instead of day
+token-count stats --by model
+
+# Group by project (cwd at the time of each turn)
+token-count stats --by project
+
+# Restrict to a date range
+token-count stats --since 2026-04-01 --until 2026-04-19
+
+# Include an estimated USD cost column
+token-count stats --cost
+
+# Re-import history from ~/.claude/projects/ at any time (safe, dedupes)
+token-count backfill
+```
+
+Example output:
+
+```text
+Totals    Input     Output  Cache create   Cache read        Total  Turns
+------  -------  ---------  ------------  -----------  -----------  -----
+all     152,248  2,703,219    13,958,482  301,311,047  318,124,996   5843
+```
+
+Columns:
+
+- **Input** — fresh, uncached prompt tokens.
+- **Output** — tokens the model generated.
+- **Cache create** — tokens written into the 5-minute prompt cache
+  (~1.25× input price).
+- **Cache read** — tokens served from a prior cache write (~0.10× input
+  price). This is usually the biggest number because Claude Code re-sends
+  the whole conversation each turn.
+- **Total** — sum of all four.
+- **Turns** — number of assistant responses (one per `message.usage` record).
+
+### VSCode extension
+
+- **Status bar** — the item on the left shows `◆ 12.4k today`. It updates
+  live as the hook appends new records. Click it to open the dashboard.
+- **Dashboard** — command palette → **Token Count: Show Dashboard**. Shows a
+  30-day line chart, summary cards (today / week / all-time), and tables
+  broken down by model and by project.
+
+---
+
+## How it works
+
+Claude Code writes every conversation to a transcript JSONL at
+`~/.claude/projects/<slug>/<session-id>.jsonl`. Each assistant event in that
+file carries a `message.usage` object with the token counts and the model
+name.
+
+When an assistant response finishes, Claude Code fires a `Stop` hook. Our
+hook entry runs `token-count hook`, which:
+
+1. Reads `session_id` and `transcript_path` from its stdin payload.
+2. Looks up the last-seen `uuid` for that session in `state.json`.
+3. Streams the transcript from that point forward, picking out new
+   `type: "assistant"` events that have `message.usage`.
+4. Appends one line per event to `~/.token-count/usage.jsonl`.
+5. Updates the per-session cursor in `state.json`.
+
+The hook always exits `0`. Errors go to stderr so they never fail the user's
+turn.
+
+```text
+Claude Code --Stop hook--> token-count hook
+                               |
+                               v
+                   tail transcript, extract new
+                   assistant turns (dedupe by uuid)
+                               |
+                               v
+                   append to ~/.token-count/usage.jsonl
+                               |
+       +-----------------------+-----------------------+
+       v                       v                       v
+ token-count stats      VSCode status bar      VSCode dashboard
+   (terminal table)     (today's total)        (charts + tables)
+```
+
+Stats are always computed at read time from `usage.jsonl`. There's no cached
+aggregate on disk — delete rows from the file and the next `stats` call
+reflects it immediately.
+
+---
+
+## Architecture
+
+### Monorepo layout
+
+```text
+token-count/                  pnpm workspace root
+├── package.json
+├── pnpm-workspace.yaml
+├── tsconfig.base.json
+├── PLAN.md
+├── CLAUDE.md
+└── packages/
+    ├── core/                 @token-count/core — shared library
+    ├── cli/                  @token-count/cli — the `token-count` binary
+    └── vscode/               token-count-vscode — the VSCode extension
+```
+
+The key invariant: `core` has no CLI or VSCode dependencies. It's plain Node
++ `zod` so both consumers import from the same source of truth.
+
+### `@token-count/core`
+
+Pure library. No side effects except the two functions in `storage.ts`.
+
+- [packages/core/src/paths.ts](packages/core/src/paths.ts) — resolves
+  `~/.token-count/{usage.jsonl,state.json}`. Honors the `TOKEN_COUNT_DIR` env
+  override (used by tests and the VSCode extension).
+- [packages/core/src/transcript.ts](packages/core/src/transcript.ts) —
+  `parseAssistantTurns(path, sinceUuid?)` streams the transcript JSONL line
+  by line and yields validated records for `type: "assistant"` events with a
+  `message.usage`. Validation is done via `zod` so a schema change upstream
+  produces a clear error instead of corrupted data.
+- [packages/core/src/storage.ts](packages/core/src/storage.ts) — the only
+  code that writes to `usage.jsonl` or `state.json`. `appendRecords` is
+  line-atomic via a single `fs.appendFile`.
+- [packages/core/src/aggregate.ts](packages/core/src/aggregate.ts) —
+  `summarize(records, { groupBy, since?, until? })`. Pure function. No
+  filesystem access.
+- [packages/core/src/pricing.ts](packages/core/src/pricing.ts) — per-token
+  USD rates for Opus / Sonnet / Haiku plus a fallback, and
+  `estimateRecordCost(record)`.
+- [packages/core/src/backfill.ts](packages/core/src/backfill.ts) — walks
+  `~/.claude/projects/*/*.jsonl` and feeds every assistant turn through the
+  same append path, dedupe-keyed by `turn_uuid`.
+- [packages/core/src/types.ts](packages/core/src/types.ts) — `UsageRecord`,
+  `Source`, `Summary` type definitions.
+
+### `@token-count/cli`
+
+A single `token-count` binary with four subcommands, wired up with
+`commander`. Each subcommand lives in its own file so `index.ts` stays a
+thin argument-parsing shim.
+
+- [packages/cli/src/init.ts](packages/cli/src/init.ts) — the only code that
+  edits `~/.claude/settings.json`. Idempotent; preserves any hooks the user
+  already has.
+- [packages/cli/src/hook.ts](packages/cli/src/hook.ts) — the Stop-hook
+  entrypoint. Small and wrapped in a top-level try/catch so it never fails
+  the user's turn.
+- [packages/cli/src/stats.ts](packages/cli/src/stats.ts) — reads all
+  records, rolls them up via `core.summarize`, and renders a table. Table
+  formatting is done by hand with `padStart`/`padEnd` so long project paths
+  don't get truncated by a library.
+
+### `token-count-vscode`
+
+- [packages/vscode/src/extension.ts](packages/vscode/src/extension.ts) —
+  activation entrypoint. Creates the status bar, registers the dashboard
+  command, and sets up a `FileSystemWatcher` on `usage.jsonl` so both views
+  refresh whenever the hook appends a record.
+- [packages/vscode/src/status-bar.ts](packages/vscode/src/status-bar.ts) —
+  computes "today's total" and renders the status bar item.
+- [packages/vscode/src/dashboard.ts](packages/vscode/src/dashboard.ts) —
+  webview dashboard. Imports `@token-count/core` directly and gets bundled
+  in at package time via `esbuild`.
+
+The extension never reads the transcript itself. It only reads
+`~/.token-count/usage.jsonl` (via `core`), which keeps its permissions
+surface small.
+
+### Storage format
+
+`~/.token-count/usage.jsonl` — one JSON object per line, one line per
+assistant turn:
+
+```json
+{
+  "ts": "2026-04-19T18:22:41.631Z",
+  "source": "claude-code",
+  "session_id": "8c975a4d-…",
+  "turn_uuid": "…",
+  "request_id": "…",
+  "cwd": "/home/mann/token-count",
+  "model": "claude-opus-4-7",
+  "input_tokens": 3,
+  "output_tokens": 412,
+  "cache_creation_input_tokens": 9847,
+  "cache_read_input_tokens": 11226
+}
+```
+
+`turn_uuid` is the dedupe key. Append-only; we never rewrite or rotate the
+file.
+
+`~/.token-count/state.json` — `{ [session_id]: last_seen_uuid }`. A cursor
+so the hook can skip already-processed transcript lines on subsequent runs.
+Purely an optimization; the dedupe-by-uuid check on append is still the
+source of truth.
+
+### Data flow summary
+
+- **Write path:** Claude Code → Stop hook → `token-count hook` →
+  `transcript.parseAssistantTurns` → `storage.appendRecords` →
+  `usage.jsonl`.
+- **Read path (CLI):** `token-count stats` → `storage.readAllRecords` →
+  `aggregate.summarize` → formatted table.
+- **Read path (extension):** `FileSystemWatcher` fires →
+  `storage.readAllRecords` → `aggregate.summarize` → status bar / webview.
+
+---
+
+## Development
+
+```bash
+pnpm install
+pnpm -r build              # build all packages
+pnpm -r test               # run the full test suite (vitest)
+pnpm --filter @token-count/cli dev    # run the CLI from source
+```
+
+Tests live under `tests/` inside each package, split into `unit/`,
+`integration/`, `e2e/`, and `stress/`. Integration and e2e tests point
+`TOKEN_COUNT_DIR` at a temp directory so they never touch real user data.
+
+---
+
+## Limitations & non-goals
+
+- **Claude Code only (for now).** The schema has a `source` field and the
+  parser is adapter-shaped, so Codex or other tools could be added later,
+  but there's no code for them yet.
+- **No rotation or compaction.** `usage.jsonl` grows forever. At ~150 bytes
+  per turn this is fine for years of heavy use; revisit if that changes.
+- **No network.** The hook never talks to anything off-machine. Rates in
+  `pricing.ts` are a hard-coded snapshot, not a live feed.
+- **Cost is an estimate.** Treat `--cost` as directional. Compare against
+  Claude Code's `/cost` command for an authoritative figure.

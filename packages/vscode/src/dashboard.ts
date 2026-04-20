@@ -45,9 +45,10 @@ export class DashboardPanel {
       "Token Count",
       vscode.ViewColumn.Active,
       {
-        // We don't load any scripts, but we keep state so reopening doesn't
-        // lose the scroll position.
-        enableScripts: false,
+        // We run a tiny inline <script> to toggle between chart timeframes
+        // (week / month / year / all). Everything rendered is static HTML we
+        // escape ourselves, so no external code ever runs here.
+        enableScripts: true,
         retainContextWhenHidden: true,
       },
     );
@@ -89,15 +90,17 @@ export class DashboardPanel {
 // ---------------------------------------------------------------------------
 
 function renderHtml(records: Parameters<typeof summarize>[0]): string {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
   const now = new Date();
   const startOfTodayUTC = Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
     now.getUTCDate(),
   );
-  const sevenDaysAgo = startOfTodayUTC - 6 * 24 * 60 * 60 * 1000;
-  const thirtyDaysAgo = startOfTodayUTC - 29 * 24 * 60 * 60 * 1000;
 
+  // --- Totals shown in the summary cards (unchanged). ---------------------
+  const sevenDaysAgo = startOfTodayUTC - 6 * DAY_MS;
   const today = summarize(records, {
     groupBy: "day",
     since: new Date(startOfTodayUTC),
@@ -107,18 +110,69 @@ function renderHtml(records: Parameters<typeof summarize>[0]): string {
     since: new Date(sevenDaysAgo),
   });
   const allTime = summarize(records, { groupBy: "day" });
-  const last30 = summarize(records, {
-    groupBy: "day",
-    since: new Date(thirtyDaysAgo),
-  });
   const byModel = summarize(records, { groupBy: "model" });
   const byProject = summarize(records, { groupBy: "project" });
+
+  // --- Headline counts. ---------------------------------------------------
+  // Each record = one assistant turn, so record_count is "messages". The
+  // other numbers are unique-value counts over the full record set — we use
+  // a Set to dedupe in O(n).
+  const messages = allTime.totals.record_count;
+  const sessions = new Set(records.map((r) => r.session_id)).size;
+  const projects = new Set(records.map((r) => r.cwd)).size;
+  const models = new Set(records.map((r) => r.model)).size;
+  const activeDays = allTime.groups.length; // groups are bucketed by day
+  const firstDay = activeDays > 0 ? allTime.groups[0]!.key : "—";
+
+  // --- Chart timeframes. --------------------------------------------------
+  // Each entry becomes one button + one hidden chart panel. We render all
+  // four up front and toggle visibility in the browser, which means
+  // switching timeframes has no round-trip to the extension host.
+  //
+  // "all" starts at the earliest recorded day so the chart spans exactly
+  // the user's history. If there are no records we fall back to today
+  // (produces an empty bar).
+  const earliestMs = records.length
+    ? Math.min(...records.map((r) => Date.parse(r.ts)))
+    : startOfTodayUTC;
+  const earliestDayUTC = Date.UTC(
+    new Date(earliestMs).getUTCFullYear(),
+    new Date(earliestMs).getUTCMonth(),
+    new Date(earliestMs).getUTCDate(),
+  );
+  const ranges: { id: string; label: string; startMs: number }[] = [
+    { id: "week", label: "Past week", startMs: startOfTodayUTC - 6 * DAY_MS },
+    { id: "month", label: "Past month", startMs: startOfTodayUTC - 29 * DAY_MS },
+    { id: "year", label: "Past year", startMs: startOfTodayUTC - 364 * DAY_MS },
+    { id: "all", label: "All time", startMs: earliestDayUTC },
+  ];
+
+  // Default selection: month (matches the previous "Last 30 days" view).
+  const defaultId = "month";
+
+  const options = ranges
+    .map(
+      (r) =>
+        `<option value="${r.id}"${r.id === defaultId ? " selected" : ""}>${escape(r.label)}</option>`,
+    )
+    .join("");
+
+  const panels = ranges
+    .map((r) => {
+      const s = summarize(records, {
+        groupBy: "day",
+        since: new Date(r.startMs),
+      });
+      const hidden = r.id === defaultId ? "" : " hidden";
+      return `<div class="chart-panel${hidden}" data-panel="${r.id}">${renderBarChart(s, r.startMs, startOfTodayUTC)}</div>`;
+    })
+    .join("");
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <title>Token Count</title>
 <style>
   body {
@@ -147,6 +201,40 @@ function renderHtml(records: Parameters<typeof summarize>[0]): string {
   svg .bar { fill: var(--vscode-charts-blue, #4a9eff); }
   svg .axis { stroke: var(--vscode-editorWidget-border); }
   svg text { fill: var(--vscode-foreground); font-size: 10px; }
+
+  /* Timeframe dropdown above the chart. Uses VSCode's dropdown theme vars
+     so it blends with the active color scheme. */
+  .range-select { margin: 12px 0; }
+  .range-select select {
+    background: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-editorWidget-border));
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .range-select select:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+  .chart-panel.hidden { display: none; }
+
+  /* Compact stats row — one line of label/value pairs above the chart. */
+  .stats {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    margin: 8px 0 24px;
+    padding: 12px 16px;
+    background: var(--vscode-editorWidget-background);
+    border: 1px solid var(--vscode-editorWidget-border);
+    border-radius: 6px;
+  }
+  .stats .stat { display: flex; flex-direction: column; }
+  .stats .stat .label { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stats .stat .value { font-size: 16px; font-variant-numeric: tabular-nums; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -158,20 +246,54 @@ function renderHtml(records: Parameters<typeof summarize>[0]): string {
     ${totalCard("All time", allTime.totals)}
   </div>
 
-  <h2>Last 30 days</h2>
-  ${renderBarChart(last30, thirtyDaysAgo, startOfTodayUTC)}
+  <div class="stats">
+    ${statItem("Messages", formatNumber(messages))}
+    ${statItem("Sessions", formatNumber(sessions))}
+    ${statItem("Projects", formatNumber(projects))}
+    ${statItem("Models", formatNumber(models))}
+    ${statItem("Active days", formatNumber(activeDays))}
+    ${statItem("First recorded", firstDay)}
+  </div>
+
+  <h2>Tokens per day</h2>
+  <div class="range-select">
+    <label for="range">Timeframe: </label>
+    <select id="range">${options}</select>
+  </div>
+  ${panels}
 
   <h2>By model</h2>
   ${renderGroupTable("Model", byModel)}
 
   <h2>By project</h2>
   ${renderGroupTable("Project", byProject)}
+
+  <script>
+    // Timeframe toggle. All four chart panels are already in the DOM; the
+    // <select> just flips the "hidden" class on everything but the chosen
+    // one. No IPC to the extension, so the switch is instant.
+    (function () {
+      const select = document.getElementById("range");
+      const panels = document.querySelectorAll(".chart-panel");
+      select.addEventListener("change", function () {
+        const range = select.value;
+        panels.forEach(function (p) {
+          p.classList.toggle("hidden", p.getAttribute("data-panel") !== range);
+        });
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
 
 function totalCard(label: string, t: TotalsBlock): string {
   return `<div class="card"><div class="label">${escape(label)}</div><div class="value">${formatNumber(t.total_tokens)}</div><div class="label">${t.record_count} turns</div></div>`;
+}
+
+// One label/value pair in the compact stats row (messages, sessions, etc).
+function statItem(label: string, value: string): string {
+  return `<div class="stat"><div class="label">${escape(label)}</div><div class="value">${escape(value)}</div></div>`;
 }
 
 function renderGroupTable(keyHeader: string, s: Summary): string {
@@ -231,12 +353,18 @@ function renderBarChart(summary: Summary, startMs: number, endMs: number): strin
   const max = Math.max(1, ...days.map((d) => d.value)); // avoid divide-by-zero
   const barW = chartW / days.length;
 
+  // Bar width math: we leave a 1px gap between bars when there's room, but
+  // for dense views (e.g. 365 bars in 900px) we shrink the gap so bars don't
+  // vanish. Clamped to a minimum of 0.5px so every day is still visible.
+  const gap = Math.min(1, barW * 0.2);
+  const innerW = Math.max(0.5, barW - gap);
+
   const bars = days
     .map((d, i) => {
       const h = (d.value / max) * chartH;
       const x = padding.left + i * barW;
       const y = padding.top + (chartH - h);
-      return `<rect class="bar" x="${x + 1}" y="${y}" width="${barW - 2}" height="${h}"><title>${escape(d.key)}: ${formatNumber(d.value)}</title></rect>`;
+      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}"><title>${escape(d.key)}: ${formatNumber(d.value)}</title></rect>`;
     })
     .join("");
 

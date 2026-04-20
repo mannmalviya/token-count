@@ -92,9 +92,14 @@ export class DashboardPanel {
 // ---------------------------------------------------------------------------
 
 function renderHtml(
-  records: Parameters<typeof summarize>[0],
+  allRecords: Parameters<typeof summarize>[0],
   prompts: ReturnType<typeof readAllPrompts>,
 ): string {
+  // Drop "<synthetic>" turns — Claude Code writes those locally when a real
+  // API response didn't land (interrupts, network errors, etc.). They carry
+  // zero/negligible usage and would otherwise pollute the model breakdown.
+  const records = allRecords.filter((r) => r.model !== "<synthetic>");
+
   const DAY_MS = 24 * 60 * 60 * 1000;
 
   const now = new Date();
@@ -124,13 +129,14 @@ function renderHtml(
   // number of times you actually typed something.
   // "User messages" = one per unique prompt_id across prompts.jsonl. This
   // matches the "messages" number Claude Code's /insights reports.
-  const apiCalls = allTime.totals.record_count;
   const userMessages = prompts.length;
   const sessions = new Set(records.map((r) => r.session_id)).size;
   const projects = new Set(records.map((r) => r.cwd)).size;
   const models = new Set(records.map((r) => r.model)).size;
   const activeDays = allTime.groups.length; // groups are bucketed by day
   const firstDay = activeDays > 0 ? allTime.groups[0]!.key : "—";
+  // Average user messages per active day. Rounded to one decimal.
+  const msgsPerDay = activeDays > 0 ? userMessages / activeDays : 0;
 
   // --- Chart timeframes. --------------------------------------------------
   // Each entry becomes one button + one hidden chart panel. We render all
@@ -165,15 +171,37 @@ function renderHtml(
     )
     .join("");
 
+  // --- Model selector. ----------------------------------------------------
+  // Sentinel value "__all__" means "don't filter by model". We use a reserved
+  // string instead of an empty one so it's impossible to collide with a real
+  // model name like `claude-opus-4-7`.
+  const ALL_MODELS = "__all__";
+  const modelList = Array.from(new Set(records.map((r) => r.model))).sort();
+  const modelOptions = [
+    `<option value="${ALL_MODELS}" selected>All models</option>`,
+    ...modelList.map(
+      (m) => `<option value="${escape(m)}">${escape(m)}</option>`,
+    ),
+  ].join("");
+
+  // Pre-render every (timeframe × model) combination so switching either
+  // dropdown is instant in the browser. Data volume is tiny — at most a few
+  // dozen panels of inline SVG — so this is cheaper than round-tripping to
+  // the extension host on every change.
+  const modelKeys = [ALL_MODELS, ...modelList];
   const panels = ranges
-    .map((r) => {
-      const s = summarize(records, {
-        groupBy: "day",
-        since: new Date(r.startMs),
-      });
-      const hidden = r.id === defaultId ? "" : " hidden";
-      return `<div class="chart-panel${hidden}" data-panel="${r.id}">${renderBarChart(s, r.startMs, startOfTodayUTC)}</div>`;
-    })
+    .flatMap((r) =>
+      modelKeys.map((m) => {
+        const filtered =
+          m === ALL_MODELS ? records : records.filter((rec) => rec.model === m);
+        const s = summarize(filtered, {
+          groupBy: "day",
+          since: new Date(r.startMs),
+        });
+        const hidden = r.id === defaultId && m === ALL_MODELS ? "" : " hidden";
+        return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}">${renderBarChart(s, r.startMs, startOfTodayUTC)}</div>`;
+      }),
+    )
     .join("");
 
   return `<!DOCTYPE html>
@@ -202,13 +230,47 @@ function renderHtml(
   .card .label { font-size: 12px; opacity: 0.7; }
   .card .value { font-size: 24px; margin-top: 4px; }
   table { border-collapse: collapse; width: 100%; margin-top: 8px; }
-  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--vscode-editorWidget-border); }
+  th, td {
+    text-align: left;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
+    border-right: 1px solid var(--vscode-editorWidget-border);
+  }
+  th:last-child, td:last-child { border-right: none; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04)); }
   th { font-weight: 500; opacity: 0.8; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .empty { opacity: 0.6; margin: 32px 0; }
   svg .bar { fill: var(--vscode-charts-blue, #4a9eff); }
+  svg .bar:hover { fill: var(--vscode-charts-orange, #e8a33d); }
   svg .axis { stroke: var(--vscode-editorWidget-border); }
+  svg .grid {
+    stroke: var(--vscode-editorWidget-border);
+    stroke-opacity: 0.4;
+    stroke-dasharray: 2 3;
+  }
   svg text { fill: var(--vscode-foreground); font-size: 10px; }
+
+  /* Custom hover tooltip. Positioned with inline JS so it tracks the mouse.
+     Kept hidden by default; shown when the .visible class is set. */
+  #chart-tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--vscode-editorHoverWidget-background, #252526);
+    color: var(--vscode-editorHoverWidget-foreground, #ccc);
+    border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.08s;
+  }
+  #chart-tooltip.visible { opacity: 1; }
+  #chart-tooltip .date { opacity: 0.75; font-size: 11px; }
+  #chart-tooltip .tokens { font-variant-numeric: tabular-nums; margin-top: 2px; }
 
   /* Timeframe dropdown above the chart. Uses VSCode's dropdown theme vars
      so it blends with the active color scheme. */
@@ -255,8 +317,8 @@ function renderHtml(
   </div>
 
   <div class="stats">
-    ${statItem("User messages", formatNumber(userMessages), "How many times did I talk to Claude?")}
-    ${statItem("API calls", formatNumber(apiCalls), "How many assistant responses were generated (one per API call, including tool-use rounds)")}
+    ${statItem("User messages", formatNumber(userMessages))}
+    ${statItem("Msgs/day", msgsPerDay.toFixed(1))}
     ${statItem("Sessions", formatNumber(sessions))}
     ${statItem("Projects", formatNumber(projects))}
     ${statItem("Models", formatNumber(models))}
@@ -264,30 +326,86 @@ function renderHtml(
     ${statItem("First recorded", firstDay)}
   </div>
 
-  <h2>Tokens per day</h2>
+  <h2 id="tokens-per-day">Tokens per day</h2>
   <div class="range-select">
     <label for="range">Timeframe: </label>
     <select id="range">${options}</select>
+    <label for="model" style="margin-left: 16px;">Model: </label>
+    <select id="model">${modelOptions}</select>
   </div>
   ${panels}
+  <div id="chart-tooltip" role="tooltip" aria-hidden="true"></div>
 
-  <h2>By model</h2>
-  ${renderGroupTable("Model", byModel)}
+  <h2 id="by-model">By model</h2>
+  ${renderGroupTable("Model", byModel, "model")}
 
   <h2>By project</h2>
-  ${renderGroupTable("Project", byProject)}
+  ${renderGroupTable("Project", byProject, undefined, true)}
 
   <script>
-    // Timeframe toggle. All four chart panels are already in the DOM; the
-    // <select> just flips the "hidden" class on everything but the chosen
-    // one. No IPC to the extension, so the switch is instant.
+    // Timeframe + model toggle. All (range × model) chart panels are already
+    // in the DOM; the two <select>s just flip the "hidden" class on everything
+    // but the one whose data-range and data-model both match. No IPC to the
+    // extension, so switching is instant.
     (function () {
-      const select = document.getElementById("range");
+      const rangeSel = document.getElementById("range");
+      const modelSel = document.getElementById("model");
       const panels = document.querySelectorAll(".chart-panel");
-      select.addEventListener("change", function () {
-        const range = select.value;
+      function update() {
+        const r = rangeSel.value;
+        const m = modelSel.value;
         panels.forEach(function (p) {
-          p.classList.toggle("hidden", p.getAttribute("data-panel") !== range);
+          const match =
+            p.getAttribute("data-range") === r &&
+            p.getAttribute("data-model") === m;
+          p.classList.toggle("hidden", !match);
+        });
+      }
+      rangeSel.addEventListener("change", update);
+      modelSel.addEventListener("change", update);
+
+      // Clicking a row in the "By model" table sets the model dropdown and
+      // scrolls the chart into view so the user sees the effect immediately.
+      document.querySelectorAll("tr.clickable").forEach(function (row) {
+        row.addEventListener("click", function () {
+          const model = row.getAttribute("data-select-model");
+          if (!model) return;
+          modelSel.value = model;
+          update();
+          const heading = document.getElementById("tokens-per-day");
+          if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+    })();
+
+    // Bar hover tooltip. Listens globally on .chart-panel containers with
+    // event delegation so we don't have to attach handlers to every <rect>.
+    // We position the tooltip in viewport (fixed) coordinates near the cursor.
+    (function () {
+      const tooltip = document.getElementById("chart-tooltip");
+      const panels = document.querySelectorAll(".chart-panel");
+      panels.forEach(function (panel) {
+        panel.addEventListener("mousemove", function (ev) {
+          const target = ev.target;
+          if (!(target instanceof SVGRectElement) || !target.classList.contains("bar")) {
+            tooltip.classList.remove("visible");
+            return;
+          }
+          const date = target.getAttribute("data-date");
+          const tokens = target.getAttribute("data-tokens");
+          tooltip.innerHTML =
+            '<div class="date">' + date + '</div>' +
+            '<div class="tokens">' + tokens + ' tokens</div>';
+          // Offset the tooltip so it sits above/right of the cursor and
+          // doesn't cover the bar itself.
+          const x = ev.clientX + 12;
+          const y = ev.clientY - 12;
+          tooltip.style.left = x + "px";
+          tooltip.style.top = y + "px";
+          tooltip.classList.add("visible");
+        });
+        panel.addEventListener("mouseleave", function () {
+          tooltip.classList.remove("visible");
         });
       });
     })();
@@ -297,7 +415,7 @@ function renderHtml(
 }
 
 function totalCard(label: string, t: TotalsBlock): string {
-  return `<div class="card"><div class="label">${escape(label)}</div><div class="value">${formatNumber(t.total_tokens)}</div><div class="label">${t.record_count} turns</div></div>`;
+  return `<div class="card"><div class="label">${escape(label)}</div><div class="value">${formatNumber(t.total_tokens)}</div><div class="label">tokens</div></div>`;
 }
 
 // One label/value pair in the compact stats row. `tooltip` is optional — when
@@ -309,20 +427,35 @@ function statItem(label: string, value: string, tooltip?: string): string {
   return `<div class="stat"${titleAttr}${cursor}><div class="label">${escape(label)}</div><div class="value">${escape(value)}</div></div>`;
 }
 
-function renderGroupTable(keyHeader: string, s: Summary): string {
+function renderGroupTable(
+  keyHeader: string,
+  s: Summary,
+  // When provided, each row becomes clickable: clicking it sets the value of
+  // the <select> with matching id (e.g. "model") and re-renders the chart.
+  selectOnClick?: "model",
+  // When true, the key column displays only the last path segment prefixed
+  // with ".../", and the full path shows up in a tooltip. Handy for the
+  // project table where "/home/mann/..." eats horizontal space.
+  shortenPaths?: boolean,
+): string {
   if (s.groups.length === 0) {
     return `<p class="empty">No data.</p>`;
   }
   const rows = s.groups
     .map((g) => {
-      return `<tr>
-        <td>${escape(g.key)}</td>
+      const rowAttr = selectOnClick
+        ? ` class="clickable" data-select-${selectOnClick}="${escape(g.key)}"`
+        : "";
+      const keyCell = shortenPaths
+        ? `<td title="${escape(g.key)}">${escape(shortenPath(g.key))}</td>`
+        : `<td>${escape(g.key)}</td>`;
+      return `<tr${rowAttr}>
+        ${keyCell}
         <td class="num">${formatNumber(g.totals.input_tokens)}</td>
         <td class="num">${formatNumber(g.totals.output_tokens)}</td>
         <td class="num">${formatNumber(g.totals.cache_creation_input_tokens)}</td>
         <td class="num">${formatNumber(g.totals.cache_read_input_tokens)}</td>
         <td class="num">${formatNumber(g.totals.total_tokens)}</td>
-        <td class="num">${g.totals.record_count}</td>
       </tr>`;
     })
     .join("");
@@ -335,7 +468,6 @@ function renderGroupTable(keyHeader: string, s: Summary): string {
         <th class="num">Cache create</th>
         <th class="num">Cache read</th>
         <th class="num">Total</th>
-        <th class="num">Turns</th>
       </tr>
     </thead>
     <tbody>${rows}</tbody>
@@ -360,10 +492,13 @@ function renderBarChart(summary: Summary, startMs: number, endMs: number): strin
 
   const width = 900;
   const height = 180;
-  const padding = { top: 10, right: 10, bottom: 30, left: 50 };
+  const padding = { top: 10, right: 10, bottom: 30, left: 60 };
   const chartW = width - padding.left - padding.right;
   const chartH = height - padding.top - padding.bottom;
-  const max = Math.max(1, ...days.map((d) => d.value)); // avoid divide-by-zero
+  const rawMax = Math.max(1, ...days.map((d) => d.value)); // avoid divide-by-zero
+  // Round the axis top up to a "nice" number (1/2/5 × 10^n) so tick values
+  // like 250k / 500k / 750k / 1M look clean instead of weird fractions.
+  const max = niceCeil(rawMax);
   const barW = chartW / days.length;
 
   // Bar width math: we leave a 1px gap between bars when there's room, but
@@ -372,34 +507,100 @@ function renderBarChart(summary: Summary, startMs: number, endMs: number): strin
   const gap = Math.min(1, barW * 0.2);
   const innerW = Math.max(0.5, barW - gap);
 
+  // Each bar carries data-* attributes so the JS tooltip can read the date
+  // and token count without re-parsing the SVG.
   const bars = days
     .map((d, i) => {
       const h = (d.value / max) * chartH;
       const x = padding.left + i * barW;
       const y = padding.top + (chartH - h);
-      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}"><title>${escape(d.key)}: ${formatNumber(d.value)}</title></rect>`;
+      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}" data-date="${escape(d.key)}" data-tokens="${formatNumber(d.value)}"></rect>`;
     })
     .join("");
 
-  // X-axis labels: first, middle, last day only (prevents clutter).
-  const xLabel = (i: number) => {
+  // X-axis labels. For short windows (week, month) we label each bar with
+  // its weekday (Mon, Tue, ...). For longer windows that would just repeat
+  // endlessly, so we fall back to MM-DD with a stride that keeps labels
+  // ~60px apart and always pin the first + last day.
+  const weekdayOf = (key: string) =>
+    new Date(key + "T00:00:00Z").toLocaleDateString("en-US", {
+      weekday: "short",
+      timeZone: "UTC",
+    });
+  const xLabel = (i: number, text: string) => {
     const d = days[i];
     if (!d) return "";
     const x = padding.left + i * barW + barW / 2;
-    return `<text x="${x}" y="${height - 10}" text-anchor="middle">${escape(d.key.slice(5))}</text>`;
+    return `<text x="${x}" y="${height - 10}" text-anchor="middle">${escape(text)}</text>`;
   };
 
-  const yLabel = `<text x="${padding.left - 8}" y="${padding.top + 10}" text-anchor="end">${formatNumber(max)}</text><text x="${padding.left - 8}" y="${padding.top + chartH}" text-anchor="end">0</text>`;
+  let labels = "";
+  if (days.length <= 31) {
+    // One weekday label per day.
+    labels = days.map((d, i) => xLabel(i, weekdayOf(d.key))).join("");
+  } else {
+    // Pick a stride so labels sit ~60px apart; always include first + last.
+    const stride = Math.max(1, Math.ceil(60 / barW));
+    const indices = new Set<number>();
+    for (let i = 0; i < days.length; i += stride) indices.add(i);
+    indices.add(days.length - 1);
+    labels = Array.from(indices)
+      .map((i) => xLabel(i, days[i]!.key.slice(5)))
+      .join("");
+  }
+
+  // Y-axis: 5 evenly-spaced ticks from 0 → max. Each tick gets a faint
+  // horizontal gridline across the chart + a compact label like "1.2M".
+  const tickCount = 4; // 5 values: 0, max/4, max/2, 3max/4, max
+  const yTicks: string[] = [];
+  const gridLines: string[] = [];
+  for (let i = 0; i <= tickCount; i += 1) {
+    const frac = i / tickCount;
+    const value = max * frac;
+    const y = padding.top + chartH * (1 - frac);
+    yTicks.push(
+      `<text x="${padding.left - 8}" y="${y + 3}" text-anchor="end">${escape(formatCompact(value))}</text>`,
+    );
+    if (i > 0) {
+      gridLines.push(
+        `<line class="grid" x1="${padding.left}" y1="${y}" x2="${padding.left + chartW}" y2="${y}" />`,
+      );
+    }
+  }
+  const yLabel = yTicks.join("");
+  const grid = gridLines.join("");
 
   return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}">
+    ${grid}
     <line class="axis" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + chartH}" />
     <line class="axis" x1="${padding.left}" y1="${padding.top + chartH}" x2="${padding.left + chartW}" y2="${padding.top + chartH}" />
     ${bars}
-    ${xLabel(0)}
-    ${xLabel(Math.floor(days.length / 2))}
-    ${xLabel(days.length - 1)}
+    ${labels}
     ${yLabel}
   </svg>`;
+}
+
+/**
+ * Round `n` up to the nearest "nice" multiplier times a power of 10. We use a
+ * fairly granular set of multipliers so the chart top sits just above the
+ * tallest bar (e.g. raw max 51M → 60M, not 100M) while still yielding clean
+ * quarter-point tick labels.
+ */
+function niceCeil(n: number): number {
+  if (n <= 0) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(n)));
+  const d = n / pow;
+  const steps = [1, 1.5, 2, 3, 4, 5, 6, 8, 10];
+  const nice = steps.find((s) => d <= s) ?? 10;
+  return nice * pow;
+}
+
+/** Short human-readable number for axis labels. 1_234_567 → "1.2M". */
+function formatCompact(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+  return String(Math.round(n));
 }
 
 function renderError(err: unknown): string {
@@ -423,4 +624,23 @@ function escape(s: string): string {
 
 function formatNumber(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+/**
+ * "/home/mann/token-count/packages/cli" → ".../packages/cli" when the path
+ * is deep, ".../token-count" when it's just under $HOME. We keep the last
+ * two segments if they exist, because "packages/cli" is more meaningful
+ * than just "cli". Non-path-looking keys are returned unchanged.
+ */
+function shortenPath(p: string): string {
+  if (!p.includes("/")) return p;
+  const parts = p.split("/").filter((s) => s.length > 0);
+  if (parts.length === 0) return p;
+  const last = parts[parts.length - 1]!;
+  // If the immediate parent is "packages" (or similar scoping dir), include
+  // it so e.g. "packages/cli" vs "packages/core" stays distinguishable.
+  if (parts.length >= 2 && parts[parts.length - 2] === "packages") {
+    return `.../${parts[parts.length - 2]}/${last}`;
+  }
+  return `.../${last}`;
 }

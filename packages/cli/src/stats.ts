@@ -17,6 +17,7 @@ import {
   type Summary,
   type TotalsBlock,
 } from "@token-count/core";
+import { accent, accentBold, dim } from "./color.js";
 
 export interface StatsOptions {
   by: GroupBy;
@@ -60,14 +61,19 @@ export function runStats(opts: StatsOptions): StatsResult {
 
   // When --cost is active, print a one-line reminder under the totals so the
   // number doesn't look like a bill. See pricing.ts for the rate source.
+  // Dimmed so it reads as a footnote rather than a primary claim.
   const costNote = opts.cost
-    ? "\nAPI rate = Anthropic per-token API pricing. Claude Code subscriptions are flat-rate; this is the equivalent retail cost, not your bill.\n"
+    ? "\n" +
+      dim(
+        "API rate = Anthropic per-token API pricing. Claude Code subscriptions are flat-rate; this is the equivalent retail cost, not your bill.",
+      ) +
+      "\n"
     : "";
 
   const output =
     renderTable(header, body) +
     "\n" +
-    renderTable(["Totals", ...header.slice(1)], [footer]) +
+    renderTable(["Totals", ...header.slice(1)], [footer], { totalsRow: true }) +
     costNote +
     "\n";
 
@@ -105,9 +111,18 @@ function fmtCost(usd: number): string {
 /**
  * Render a simple left/right-aligned text table. First column is left-aligned
  * (labels, paths), numeric columns are right-aligned for easy eyeballing.
+ *
+ * Coloring is applied AFTER padding so ANSI escape codes don't inflate the
+ * string length that `padStart`/`padEnd` use to compute column widths.
+ * Otherwise headers and totals would misalign by ~10 invisible characters
+ * per cell. The `totalsRow` flag highlights the whole single-row totals
+ * table in the accent color instead of leaving it plain.
  */
-function renderTable(header: string[], rows: string[][]): string {
-  // Compute the widest value in each column so content never truncates.
+function renderTable(
+  header: string[],
+  rows: string[][],
+  opts: { totalsRow?: boolean } = {},
+): string {
   const allRows = [header, ...rows];
   const widths = header.map((_, i) =>
     Math.max(...allRows.map((r) => (r[i] ?? "").length)),
@@ -116,20 +131,35 @@ function renderTable(header: string[], rows: string[][]): string {
   const sep = "  "; // two-space column separator — visually clean, no box drawing
   const lines: string[] = [];
 
-  lines.push(formatRow(header, widths, sep));
-  // A divider under the header for visual separation.
-  lines.push(widths.map((w) => "-".repeat(w)).join(sep));
-  for (const r of rows) lines.push(formatRow(r, widths, sep));
+  // Header row: bold + terracotta so the column titles read as the accent
+  // for each table.
+  lines.push(formatRow(header, widths, sep, accentBold));
+  // Divider: dimmed so it recedes compared to the numbers. Still visually
+  // separates the header from the data.
+  lines.push(
+    dim(widths.map((w) => "-".repeat(w)).join(sep)),
+  );
+  // Data rows: either accent-colored (the Totals sub-table) or plain
+  // (the main per-group table — leaving numbers uncolored keeps long
+  // tables scannable).
+  const rowStyler = opts.totalsRow ? accent : undefined;
+  for (const r of rows) lines.push(formatRow(r, widths, sep, rowStyler));
 
   return lines.join("\n") + "\n";
 }
 
-function formatRow(cells: string[], widths: number[], sep: string): string {
+function formatRow(
+  cells: string[],
+  widths: number[],
+  sep: string,
+  styler?: (s: string) => string,
+): string {
   return cells
     .map((cell, i) => {
       const w = widths[i]!;
       // First column = labels (left-aligned). Rest = numbers (right-aligned).
-      return i === 0 ? cell.padEnd(w) : cell.padStart(w);
+      const padded = i === 0 ? cell.padEnd(w) : cell.padStart(w);
+      return styler ? styler(padded) : padded;
     })
     .join(sep)
     .trimEnd();

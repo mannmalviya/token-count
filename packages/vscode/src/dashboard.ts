@@ -381,6 +381,16 @@ function renderHtml(
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <title>Token Count</title>
 <style>
+  /* Claude-Code-inspired orange palette. Defined once up top so every
+     chart / toggle / highlight reads from the same accent. --tc-accent is
+     the terracotta that matches Claude Code's branded orange; the
+     -strong / -soft variants are pre-computed lighter / darker tints so
+     hover and area-fill effects don't need runtime color math. */
+  :root {
+    --tc-accent: #D97757;
+    --tc-accent-strong: #C26240;
+    --tc-accent-soft: rgba(217, 119, 87, 0.15);
+  }
   body {
     font-family: var(--vscode-font-family);
     color: var(--vscode-foreground);
@@ -434,16 +444,16 @@ function renderHtml(
     opacity: 1;
   }
   .empty { opacity: 0.6; margin: 32px 0; }
-  svg .bar { fill: var(--vscode-charts-blue, #4a9eff); }
-  svg .bar:hover { fill: var(--vscode-charts-orange, #e8a33d); }
+  svg .bar { fill: var(--tc-accent); }
+  svg .bar:hover { fill: var(--tc-accent-strong); }
   svg .line {
     fill: none;
-    stroke: var(--vscode-charts-blue, #4a9eff);
+    stroke: var(--tc-accent);
     stroke-width: 2;
     stroke-linejoin: round;
     stroke-linecap: round;
   }
-  svg .area { fill: var(--vscode-charts-blue, #4a9eff); fill-opacity: 0.15; }
+  svg .area { fill: var(--tc-accent); fill-opacity: 0.18; }
   svg circle.bar { stroke: var(--vscode-editor-background); stroke-width: 1.5; }
   svg .axis { stroke: var(--vscode-editorWidget-border); }
   svg .grid {
@@ -519,8 +529,8 @@ function renderHtml(
     background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04));
   }
   .toggle-btn.active {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+    background: var(--tc-accent);
+    color: #ffffff;
   }
   .toggle-btn:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 
@@ -555,10 +565,12 @@ function renderHtml(
   }
   /* Applied by JS when the user clicks a project row — also explodes the
      wedge (same --ex/--ey vector) plus brightens + drop-shadows it so the
-     selection stands out whether or not the pointer is hovering. */
+     selection stands out whether or not the pointer is hovering. The
+     drop-shadow tint picks up the Claude orange so the highlight reads as
+     "selected" against the multicolor pie. */
   .pie-chart .slice.highlighted {
     transform: translate(var(--ex, 0px), var(--ey, 0px));
-    filter: brightness(1.12) drop-shadow(0 0 4px rgba(0, 0, 0, 0.4));
+    filter: brightness(1.12) drop-shadow(0 0 5px rgba(217, 119, 87, 0.55));
   }
   /* Donut center label: big total + compact unit beneath. pointer-events
      off so the text doesn't eat hover events on wedge edges behind it. */
@@ -634,19 +646,20 @@ function renderHtml(
   .stats .stat .value { font-size: 16px; font-variant-numeric: tabular-nums; margin-top: 2px; }
 
   /* Live-dot next to the heading. Signals that the dashboard auto-refreshes
-     when usage.jsonl changes (the extension watches the file). */
+     when usage.jsonl changes (the extension watches the file). Tinted with
+     the Claude orange so it ties into the rest of the palette. */
   .live-dot {
     display: inline-block;
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    background: #22c55e;
+    background: var(--tc-accent);
     animation: tc-pulse 1.6s ease-in-out infinite;
   }
   @keyframes tc-pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
-    70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    0%   { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0.7); }
+    70%  { box-shadow: 0 0 0 8px rgba(217, 119, 87, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0); }
   }
 </style>
 </head>
@@ -1323,20 +1336,21 @@ function renderLineChart(
 
 /**
  * Color palette used for pie-chart slices (and anywhere else we need N
- * distinct categorical colors). Prefer VSCode's chart theme vars so the
- * pie tones match the rest of the editor, with concrete fallbacks for
- * themes that don't define them.
+ * distinct categorical colors). Anchored on Claude Code's terracotta so
+ * the biggest slice matches the rest of the dashboard accent, with a set
+ * of warm/analogous tones for the remaining wedges so the palette reads
+ * as one family rather than a random rainbow.
  */
 const PIE_COLORS = [
-  "var(--vscode-charts-blue, #4a9eff)",
-  "var(--vscode-charts-orange, #e8a33d)",
-  "var(--vscode-charts-green, #89d185)",
-  "var(--vscode-charts-purple, #c586c0)",
-  "var(--vscode-charts-red, #f48771)",
-  "var(--vscode-charts-yellow, #dcdcaa)",
-  "#6db3f2",
-  "#f29f7c",
-  "#b4a7d6",
+  "#D97757", // tc-accent — Claude terracotta (biggest slice by default)
+  "#E8B07A", // warm sand
+  "#C26240", // deeper orange
+  "#F2C894", // peach
+  "#A8593F", // burnt sienna
+  "#F4A07C", // coral
+  "#8B4A33", // cocoa
+  "#E8CBA7", // cream
+  "#6DA3A8", // muted teal (cool contrast for long tails)
 ];
 
 /**

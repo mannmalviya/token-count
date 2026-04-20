@@ -24,15 +24,51 @@ async function main() {
     .description("Local-first Claude Code token usage tracker.")
     .version("0.0.0");
 
+  // Top-level examples. Commander only lists subcommand *names* in the root
+  // --help (their flags live under `<cmd> --help`). Surfacing concrete
+  // invocations here so flags like `--cost` and `--by` are discoverable
+  // without having to drill into each subcommand first.
+  program.addHelpText(
+    "after",
+    `
+Examples:
+  $ token-count init                       Install the Stop hook + backfill existing transcripts
+  $ token-count init --no-backfill         Install the hook only; skip importing history
+  $ token-count backfill                   Re-scan ~/.claude/projects for new records (safe to re-run)
+  $ token-count stats                      Per-day totals
+  $ token-count stats --by model           Totals grouped by model
+  $ token-count stats --by project --cost  Per-project totals with an API-rate USD column
+  $ token-count stats --since 2026-04-01   Only records on/after a given ISO date
+
+Environment:
+  TOKEN_COUNT_DIR   Override the storage directory (default: ~/.token-count)
+
+See \`token-count <command> --help\` for options specific to each subcommand.`,
+  );
+
   // -------------------------------------------------------------------------
   // init
   // -------------------------------------------------------------------------
-  program
+  const initCmd = program
     .command("init")
     .description("Install the Stop hook into Claude Code's settings, and backfill existing transcripts.")
-    .option("--project", "Write to .claude/settings.json in cwd instead of the global ~/.claude/settings.json")
-    .option("--no-backfill", "Skip importing token usage from existing Claude transcripts")
-    .action((opts: { project?: boolean; backfill?: boolean }) => {
+    .option(
+      "--project",
+      "Install into .claude/settings.json in the current directory (project-scoped) instead of ~/.claude/settings.json (global).",
+    )
+    .option(
+      "--no-backfill",
+      "Skip the initial import of existing transcripts under ~/.claude/projects. Only new Claude Code sessions will be recorded.",
+    );
+  initCmd.addHelpText(
+    "after",
+    `
+Examples:
+  $ token-count init                Install the global hook and backfill history
+  $ token-count init --project      Install only for the current project
+  $ token-count init --no-backfill  Install the hook but don't import existing transcripts`,
+  );
+  initCmd.action((opts: { project?: boolean; backfill?: boolean }) => {
       // Build the absolute command Claude Code should invoke. We resolve any
       // symlinks (pnpm link creates one) so the settings file contains the
       // real path to this binary.
@@ -101,14 +137,27 @@ async function main() {
   // -------------------------------------------------------------------------
   // stats
   // -------------------------------------------------------------------------
-  program
+  const statsCmd = program
     .command("stats")
     .description("Print a summary of recorded token usage.")
-    .option("--by <dim>", "Group by: day, model, or project", "day")
-    .option("--since <iso>", "Include only records on/after this ISO date")
-    .option("--until <iso>", "Include only records before this ISO date")
-    .option("--cost", "Include an estimated USD cost column (rates from core/pricing.ts)")
-    .action((opts: { by?: string; since?: string; until?: string; cost?: boolean }) => {
+    .option("--by <dim>", "Group rows by one of: day, model, project", "day")
+    .option("--since <iso>", "Only include records on/after this ISO date (e.g. 2026-04-01)")
+    .option("--until <iso>", "Only include records strictly before this ISO date")
+    .option(
+      "--cost",
+      "Add an 'API rate (USD)' column showing what these tokens would cost at Anthropic's per-token API rates. Claude Code subscriptions are flat-rate, so this is a reference value — not what you actually pay.",
+    );
+  statsCmd.addHelpText(
+    "after",
+    `
+Examples:
+  $ token-count stats                                 Per-day totals (default)
+  $ token-count stats --by model                      Totals grouped by model
+  $ token-count stats --by project --cost             Per-project totals + API-rate USD
+  $ token-count stats --since 2026-04-01 --until 2026-04-15
+                                                      Restrict to a date window`,
+  );
+  statsCmd.action((opts: { by?: string; since?: string; until?: string; cost?: boolean }) => {
       const by = opts.by as GroupBy;
       if (!["day", "model", "project"].includes(by)) {
         console.error(`--by must be one of: day, model, project (got "${opts.by}")`);
@@ -127,10 +176,16 @@ async function main() {
   // backfill — import history from ~/.claude/projects/ on demand.
   // Safe to re-run; dedupes against existing records by turn_uuid.
   // -------------------------------------------------------------------------
-  program
+  const backfillCmd = program
     .command("backfill")
-    .description("Import all assistant turns from existing Claude Code transcripts.")
-    .action(() => {
+    .description("Import all assistant turns from existing Claude Code transcripts under ~/.claude/projects. Safe to re-run — records dedupe by turn UUID.");
+  backfillCmd.addHelpText(
+    "after",
+    `
+Examples:
+  $ token-count backfill   Scan ~/.claude/projects/*/*.jsonl and append any missing records`,
+  );
+  backfillCmd.action(() => {
       const projectsDir = path.join(os.homedir(), ".claude", "projects");
       const bf = backfillFromClaudeProjects({ projectsDir });
       console.log(

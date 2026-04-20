@@ -354,6 +354,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <title>Token Count</title>
 <style>
+  /* Claude-Code orange accent. Kept in sync with dashboard.ts so both
+     surfaces feel like one app — any future tweaks should change both. */
+  :root {
+    --tc-accent: #D97757;
+    --tc-accent-strong: #C26240;
+  }
   body {
     font-family: var(--vscode-font-family);
     color: var(--vscode-foreground);
@@ -378,21 +384,30 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #22c55e;
+    background: var(--tc-accent);
     animation: tc-pulse 1.6s ease-in-out infinite;
   }
   @keyframes tc-pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
-    70%  { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    0%   { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0.7); }
+    70%  { box-shadow: 0 0 0 6px rgba(217, 119, 87, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0); }
   }
+  /* Stat card: subtle accent strip on the left so the cards read as
+     "Token Count" items at a glance, plus a warmer hover state. The
+     left border gets thicker on hover rather than changing color to
+     avoid a visible shift of the card's content. */
   .stat-card {
     position: relative;
     background: var(--vscode-editorWidget-background);
     border: 1px solid var(--vscode-editorWidget-border);
+    border-left: 3px solid var(--tc-accent);
     border-radius: 4px;
-    padding: 10px 12px;
+    padding: 10px 12px 10px 10px;
     margin-bottom: 8px;
+    transition: border-color 0.1s, background 0.1s;
+  }
+  .stat-card:hover {
+    border-left-color: var(--tc-accent-strong);
   }
   .stat-card .label {
     font-size: 11px;
@@ -400,11 +415,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     text-transform: uppercase;
     letter-spacing: 0.4px;
   }
+  /* Big value: tinted with the Claude orange so it stands out and ties
+     visually to the dashboard charts. */
   .stat-card .value {
     font-size: 18px;
     margin-top: 2px;
     font-variant-numeric: tabular-nums;
     word-break: break-word;
+    color: var(--tc-accent);
+    font-weight: 600;
   }
   .stat-card .sub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
   /* Small X in the corner — hidden until the user hovers the card so the
@@ -448,8 +467,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
   }
   button.add-stat:hover {
     opacity: 1;
-    border-color: var(--vscode-focusBorder, var(--vscode-editorWidget-border));
+    border-color: var(--tc-accent);
+    color: var(--tc-accent);
   }
+  /* Primary CTA: Claude-orange fill with white text, matching the dashboard
+     toggle-active state. Darkens on hover to the -strong variant. */
   button.open-dash {
     display: block;
     width: 100%;
@@ -457,13 +479,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     font-size: 12px;
     font-family: inherit;
     font-weight: 500;
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-background);
-    border: 1px solid var(--vscode-button-border, transparent);
+    color: #ffffff;
+    background: var(--tc-accent);
+    border: 1px solid var(--tc-accent);
     border-radius: 4px;
     cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
   }
-  button.open-dash:hover { background: var(--vscode-button-hoverBackground); }
+  button.open-dash:hover {
+    background: var(--tc-accent-strong);
+    border-color: var(--tc-accent-strong);
+  }
   .empty { opacity: 0.6; font-size: 12px; margin: 12px 0; }
 </style>
 </head>

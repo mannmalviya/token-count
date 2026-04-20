@@ -21,10 +21,21 @@ No cloud. No account. No telemetry. All data lives under `~/.token-count/`.
 - **`token-count stats`** — terminal table grouped by day, model, or project,
   with optional `--since`/`--until` windows and an optional `--cost` column
   (USD estimate using published Anthropic rates).
-- **VSCode status bar** — live "today's total" tokens in the left status bar,
-  updated automatically whenever a new turn is recorded.
-- **VSCode dashboard** — webview panel with a 30-day time-series chart plus
-  all-time / week / today totals and breakdowns by model and project.
+- **VSCode — three surfaces**:
+  - **Left status bar** — live "today's total" tokens, always visible.
+  - **Right status bar** — rich hover tooltip with today / 7-day / all-time
+    totals and the top model. Can be disabled via
+    `tokenCount.rightStatusBar.enabled`.
+  - **Activity-bar sidebar** — a customizable quick-peek panel. Ships with
+    four default stats (today tokens, today messages, current project's
+    all-time tokens and messages) and a `+` button to pin any of 10 more
+    (7-day totals, sessions, active days, msgs/day, top model, …).
+- **Full dashboard** (webview) — summary cards, a time-series chart
+  (bars *or* line) across week / month / year / all-time windows, a
+  tokens-vs-messages metric toggle, filters by model and project, sortable
+  "By model" / "By project" tables, and a clickable donut breakdown of
+  projects. Clicking a row or a pie slice filters the chart to that
+  model/project.
 - **Deduped and append-only** — records are keyed by the transcript event's
   `uuid`, so re-running backfill or restarting the hook can never
   double-count.
@@ -106,6 +117,9 @@ token-count stats --cost
 token-count backfill
 ```
 
+Run `token-count --help` (or `token-count <subcommand> --help`) for the
+full list of flags and concrete examples.
+
 Example output:
 
 ```text
@@ -128,11 +142,43 @@ Columns:
 
 ### VSCode extension
 
-- **Status bar** — the item on the left shows `◆ 12.4k today`. It updates
-  live as the hook appends new records. Click it to open the dashboard.
-- **Dashboard** — command palette → **Token Count: Show Dashboard**. Shows a
-  30-day line chart, summary cards (today / week / all-time), and tables
-  broken down by model and by project.
+All four surfaces read the same `~/.token-count/usage.jsonl` and auto-refresh
+whenever the hook appends a record.
+
+- **Left status bar** — shows `◆ 12.4k today`. Click to open the dashboard.
+- **Right status bar** — shows the same "today" number with a different
+  icon. Hovering reveals a markdown tooltip with today / last-7-days /
+  all-time totals, message counts, and the top model. Click to open the
+  dashboard. Toggle off via the `tokenCount.rightStatusBar.enabled` setting.
+- **Activity-bar sidebar** — click the Token Count icon in the left
+  activity bar to open a "Usage Summary" panel. Four default stat cards
+  (today tokens, today messages, current project tokens, current project
+  messages) plus a `+ Add stat` tile that opens a picker with the rest
+  (7-day / all-time totals and messages, sessions, active days, msgs/day,
+  top model today). Each pinned stat has a remove button (`×`) that
+  appears on hover.
+- **Dashboard** — command palette → **Token Count: Show Dashboard** (or
+  click any status-bar item). Contents:
+  - Summary cards for today / last 7 days / all-time tokens, plus a compact
+    stats row (user messages, msgs/day, sessions, projects, models, active
+    days, first-recorded date).
+  - A time-series chart with a timeframe dropdown (past week / month /
+    year / all-time), a model filter, a project filter, a **Bars/Line**
+    toggle, and a **Tokens/Messages** toggle. All combinations are
+    pre-rendered, so switching is instant.
+  - A "By model" table that's sortable on any column (click a header to
+    toggle descending/ascending) and whose rows are clickable — clicking
+    a model filters the chart above.
+  - A "Project breakdown" donut with its own Tokens/Messages toggle and a
+    center-label total. Hovering a wedge pops it outward; clicking a wedge
+    filters the chart to that project (and highlights the matching wedge).
+  - A "By project" table, also sortable and clickable.
+
+Settings (open with **Preferences: Open User Settings** → search
+"token count"):
+
+- `tokenCount.rightStatusBar.enabled` (default `true`) — show/hide the
+  right-side status bar item.
 
 ---
 
@@ -245,18 +291,26 @@ thin argument-parsing shim.
 ### `token-count-vscode`
 
 - [packages/vscode/src/extension.ts](packages/vscode/src/extension.ts) —
-  activation entrypoint. Creates the status bar, registers the dashboard
-  command, and sets up a `FileSystemWatcher` on `usage.jsonl` so both views
-  refresh whenever the hook appends a record.
+  activation entrypoint. Creates all four surfaces, registers the
+  dashboard command, and sets up a `FileSystemWatcher` on `usage.jsonl`
+  (and `prompts.jsonl`) so everything refreshes whenever the hook appends
+  a record.
 - [packages/vscode/src/status-bar.ts](packages/vscode/src/status-bar.ts) —
-  computes "today's total" and renders the status bar item.
+  left status bar. Shows "today's total".
+- [packages/vscode/src/right-status-bar.ts](packages/vscode/src/right-status-bar.ts)
+  — right status bar. Same label, but its tooltip is a
+  `vscode.MarkdownString` with the rich quick-peek breakdown.
+- [packages/vscode/src/sidebar-view.ts](packages/vscode/src/sidebar-view.ts) —
+  activity-bar webview. Renders the pinned stat cards, handles the
+  `+ Add stat` picker, and persists the list via `context.globalState`.
 - [packages/vscode/src/dashboard.ts](packages/vscode/src/dashboard.ts) —
-  webview dashboard. Imports `@token-count/core` directly and gets bundled
-  in at package time via `esbuild`.
+  full dashboard webview. All charts are hand-rolled inline SVG; every
+  filter combination is pre-rendered and toggled via CSS classes, so
+  switching is a no-op on the extension host.
 
 The extension never reads the transcript itself. It only reads
-`~/.token-count/usage.jsonl` (via `core`), which keeps its permissions
-surface small.
+`~/.token-count/usage.jsonl` and `~/.token-count/prompts.jsonl` (via
+`core`), which keeps its permissions surface small.
 
 ### Storage format
 

@@ -1,50 +1,79 @@
-# token-count
+<div align="center">
+    <h1>token-count</h1>
+    <p><strong>Local-first token usage tracker for <a href="https://claude.com/claude-code">Claude Code</a>.</strong></p>
+    <p>A <code>Stop</code> hook records every assistant turn's token counts to a JSONL file on your disk. A CLI and a VSCode extension read that file to show totals, breakdowns, and cost estimates.</p>
+    <p><em>No cloud. No account. No telemetry.</em> All data lives under <code>~/.token-count/</code>.</p>
+</div>
 
-A local-first tracker for [Claude Code](https://claude.com/claude-code) token
-usage. Every time Claude finishes a response, a `Stop` hook records the turn's
-token counts to a JSONL file on your disk. A CLI and a VSCode extension read
-that file to show totals, breakdowns, and cost estimates.
-
-No cloud. No account. No telemetry. All data lives under `~/.token-count/`.
+<p align="center">
+    <img src="https://img.shields.io/badge/TypeScript-5.6-3178c6?logo=typescript&logoColor=white" alt="TypeScript" />
+    <img src="https://img.shields.io/badge/node-%3E%3D18.17-success?logo=node.js&logoColor=white" alt="Node >=18.17" />
+    <img src="https://img.shields.io/badge/pnpm-workspaces-F69220?logo=pnpm&logoColor=white" alt="pnpm workspaces" />
+    <img src="https://img.shields.io/badge/local--first-no%20cloud-D97757" alt="Local-first" />
+    <img src="https://img.shields.io/badge/VSCode-extension-007ACC?logo=visualstudiocode&logoColor=white" alt="VSCode extension" />
+    <a href="https://deepwiki.com/mannmalviya/token-count"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
+</p>
 
 ---
 
-## Features
+## ⚡ Quick Start
 
-- **Per-turn recording** — every assistant response is captured with its
-  `input`, `output`, `cache_creation`, and `cache_read` token counts, plus the
-  model and working directory.
-- **Backfill from history** — `token-count init` and `token-count backfill`
-  can import every assistant turn already sitting in
-  `~/.claude/projects/*/*.jsonl`, so you get your full history the first time
-  you install.
-- **`token-count stats`** — terminal table grouped by day, model, or project,
-  with optional `--since`/`--until` windows and an optional `--cost` column
-  (USD estimate using published Anthropic rates).
-- **VSCode — three surfaces**:
-  - **Left status bar** — live "today's total" tokens, always visible.
-  - **Right status bar** — rich hover tooltip with today / 7-day / all-time
-    totals and the top model. Can be disabled via
+```bash
+# 1. Clone and build
+git clone <this-repo> token-count && cd token-count
+pnpm install && pnpm -r build
+
+# 2. Put the `token-count` binary on your PATH
+pnpm --filter @token-count/cli link --global
+
+# 3. Install the Stop hook (also backfills your entire Claude Code history)
+token-count init
+
+# 4. See your usage
+token-count stats
+```
+
+That's it — every Claude Code session from now on will record automatically,
+and `token-count stats` will roll up totals by day, model, or project.
+
+---
+
+## ✨ Features
+
+- 📝 **Per-turn recording** — every assistant response is captured with its
+  `input`, `output`, `cache_creation`, and `cache_read` token counts, plus
+  the model and working directory.
+- 📚 **Backfill from history** — `token-count init` and `token-count backfill`
+  import every assistant turn already sitting in
+  `~/.claude/projects/*/*.jsonl`, so you get your full history on day one.
+- 📊 **`token-count stats`** — colorful terminal table grouped by day, model,
+  or project, with `--since`/`--until` windows and an optional `--cost`
+  column (USD estimate using published Anthropic rates).
+- 🎨 **VSCode — three surfaces**:
+  - 🔢 **Left status bar** — live "today's total" tokens, always visible.
+  - 💬 **Right status bar** — rich hover tooltip with today / 7-day /
+    all-time totals and the top model. Can be disabled via
     `tokenCount.rightStatusBar.enabled`.
-  - **Activity-bar sidebar** — a customizable quick-peek panel. Ships with
-    four default stats (today tokens, today messages, current project's
-    all-time tokens and messages) and a `+` button to pin any of 10 more
-    (7-day totals, sessions, active days, msgs/day, top model, …).
-- **Full dashboard** (webview) — summary cards, a time-series chart
+  - 📌 **Activity-bar sidebar** — a customizable quick-peek panel. Ships
+    with four default stats (today tokens, today messages, current
+    project's all-time tokens and messages) and a `+` button to pin any of
+    10 more (7-day totals, sessions, active days, msgs/day, top model, …).
+- 📈 **Full dashboard** (webview) — summary cards, a time-series chart
   (bars *or* line) across week / month / year / all-time windows, a
   tokens-vs-messages metric toggle, filters by model and project, sortable
   "By model" / "By project" tables, and a clickable donut breakdown of
-  projects. Clicking a row or a pie slice filters the chart to that
-  model/project.
-- **Deduped and append-only** — records are keyed by the transcript event's
-  `uuid`, so re-running backfill or restarting the hook can never
+  projects. Clicking a row or a pie slice filters the chart above.
+- 🔒 **Deduped and append-only** — records are keyed by the transcript
+  event's `uuid`, so re-running backfill or restarting the hook can never
   double-count.
-- **Safe by construction** — the hook always exits 0, so a bug in
+- 🛡️ **Safe by construction** — the hook always exits 0, so a bug in
   `token-count` can't ever block your Claude Code session.
+- 💾 **Zero dependencies on the cloud** — everything lives under
+  `~/.token-count/`. No network calls, no telemetry, no account.
 
 ---
 
-## Setup
+## 🛠️ Setup
 
 ### 1. Install dependencies and build
 
@@ -93,7 +122,7 @@ and press `F5` to launch an Extension Development Host.
 
 ---
 
-## Usage
+## 💻 Usage
 
 ### CLI
 
@@ -182,7 +211,7 @@ Settings (open with **Preferences: Open User Settings** → search
 
 ---
 
-## How it works
+## ⚙️ How it works
 
 Claude Code writes every conversation to a transcript JSONL at
 `~/.claude/projects/<slug>/<session-id>.jsonl`. Each assistant event in that
@@ -224,7 +253,7 @@ reflects it immediately.
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ### Monorepo layout
 
@@ -353,7 +382,7 @@ source of truth.
 
 ---
 
-## Development
+## 🧪 Development
 
 ```bash
 pnpm install
@@ -368,7 +397,7 @@ Tests live under `tests/` inside each package, split into `unit/`,
 
 ---
 
-## Limitations & non-goals
+## 🚧 Limitations & non-goals
 
 - **Claude Code only (for now).** The schema has a `source` field and the
   parser is adapter-shaped, so Codex or other tools could be added later,

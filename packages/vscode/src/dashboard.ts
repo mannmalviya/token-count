@@ -412,6 +412,27 @@ function renderHtml(
   tr.clickable:hover td { background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04)); }
   th { font-weight: 500; opacity: 0.8; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* Sortable column headers. Clicking toggles sort direction; the little
+     caret beside the label shows which column is currently active and which
+     way it's sorted. We keep a baseline faint caret on inactive columns so
+     the UI signals "this is clickable" on hover. */
+  table.sortable th[data-sort-col] {
+    cursor: pointer;
+    user-select: none;
+  }
+  table.sortable th[data-sort-col]:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04));
+  }
+  table.sortable th .sort-indicator {
+    display: inline-block;
+    margin-left: 4px;
+    opacity: 0.35;
+    font-size: 10px;
+    min-width: 8px;
+  }
+  table.sortable th.sort-active .sort-indicator {
+    opacity: 1;
+  }
   .empty { opacity: 0.6; margin: 32px 0; }
   svg .bar { fill: var(--vscode-charts-blue, #4a9eff); }
   svg .bar:hover { fill: var(--vscode-charts-orange, #e8a33d); }
@@ -521,16 +542,40 @@ function renderHtml(
   .pie-chart .slice {
     stroke: var(--vscode-editor-background);
     stroke-width: 2;
-    transition: opacity 0.1s, filter 0.15s, stroke-width 0.15s;
+    cursor: pointer;
+    transition: transform 0.18s ease-out, opacity 0.1s, filter 0.15s, stroke-width 0.15s;
   }
-  .pie-chart .slice:hover { opacity: 0.85; }
-  /* Applied by JS when the user clicks a project row — thickens the stroke
-     and brightens the wedge so the selection stands out without moving any
-     geometry around. */
+  /* Hover-explode: slide the wedge outward along its precomputed angle
+     bisector. --ex/--ey are set inline per-wedge in renderProjectPie.
+     Fallback to 0 so the single-slice donut (which doesn't set them) stays
+     put on hover. */
+  .pie-chart .slice:hover {
+    transform: translate(var(--ex, 0px), var(--ey, 0px));
+    filter: brightness(1.08);
+  }
+  /* Applied by JS when the user clicks a project row — also explodes the
+     wedge (same --ex/--ey vector) plus brightens + drop-shadows it so the
+     selection stands out whether or not the pointer is hovering. */
   .pie-chart .slice.highlighted {
-    stroke: var(--vscode-focusBorder, #4a9eff);
-    stroke-width: 4;
+    transform: translate(var(--ex, 0px), var(--ey, 0px));
     filter: brightness(1.12) drop-shadow(0 0 4px rgba(0, 0, 0, 0.4));
+  }
+  /* Donut center label: big total + compact unit beneath. pointer-events
+     off so the text doesn't eat hover events on wedge edges behind it. */
+  .pie-chart .donut-total {
+    font-size: 24px;
+    font-weight: 600;
+    fill: var(--vscode-foreground);
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+  .pie-chart .donut-unit {
+    font-size: 10px;
+    fill: var(--vscode-foreground);
+    opacity: 0.6;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    pointer-events: none;
   }
   /* Legend uses CSS grid with auto-fit so the number of columns adapts to
      the dashboard width: narrow pane → 1 column, wide → 3-4. Each cell is
@@ -747,6 +792,27 @@ function renderHtml(
           if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
         });
       });
+
+      // Clicking a pie slice filters the top chart by that project — same
+      // behavior as clicking its row in the By project table. The "Other"
+      // aggregate wedge is skipped because it isn't a single real project.
+      // Only slices whose project exists as an <option> in the project
+      // dropdown are actionable (guards against stale data).
+      document.querySelectorAll(".pie-panel .slice").forEach(function (slice) {
+        slice.addEventListener("click", function () {
+          const key = slice.getAttribute("data-key");
+          if (!key || key === "Other") return;
+          const hasOption = Array.from(projectSel.options).some(function (o) {
+            return o.value === key;
+          });
+          if (!hasOption) return;
+          projectSel.value = key;
+          modelSel.value = ALL;
+          update();
+          const heading = document.getElementById("tokens-per-day");
+          if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
     })();
 
     // Bar hover tooltip. Listens globally on .chart-panel containers with
@@ -800,6 +866,70 @@ function renderHtml(
           const m = btn.getAttribute("data-metric");
           panels.forEach(function (p) {
             p.classList.toggle("hidden", p.getAttribute("data-metric") !== m);
+          });
+        });
+      });
+    })();
+
+    // Sortable tables (By model, By project). Clicking a column header sorts
+    // descending on the first click and flips to ascending on the next. The
+    // <th>'s data-sort-type tells us "string" (localeCompare) or "number"
+    // (parseFloat); each <td>'s data-sort-value holds the raw value so we
+    // don't have to re-parse "1,234,567"-style display strings. We store the
+    // active column + direction on the <table> itself so repeat clicks on
+    // the same column toggle correctly.
+    (function () {
+      const tables = document.querySelectorAll("table.sortable");
+      tables.forEach(function (table) {
+        const headers = table.querySelectorAll("th[data-sort-col]");
+        headers.forEach(function (th) {
+          th.addEventListener("click", function () {
+            const col = th.getAttribute("data-sort-col");
+            const type = th.getAttribute("data-sort-type") || "string";
+            const currentCol = table.getAttribute("data-sort-col");
+            const currentDir = table.getAttribute("data-sort-dir");
+            // Same column again → flip direction. Otherwise start at "desc"
+            // since users almost always want "biggest first" on a fresh sort.
+            const dir =
+              currentCol === col && currentDir === "desc" ? "asc" : (currentCol === col ? "desc" : "desc");
+            table.setAttribute("data-sort-col", col);
+            table.setAttribute("data-sort-dir", dir);
+
+            // Update every header's indicator: arrow on the active one, clear
+            // on everyone else. We mark the active header with .sort-active
+            // so the CSS can bump its opacity.
+            headers.forEach(function (h) {
+              const ind = h.querySelector(".sort-indicator");
+              if (h === th) {
+                h.classList.add("sort-active");
+                if (ind) ind.textContent = dir === "desc" ? "▼" : "▲";
+              } else {
+                h.classList.remove("sort-active");
+                if (ind) ind.textContent = "";
+              }
+            });
+
+            // Sort the tbody rows in memory then re-append in the new order.
+            // appendChild on an existing node moves it, so we don't have to
+            // detach first — the browser handles the reorder.
+            const tbody = table.querySelector("tbody");
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            const colIdx = parseInt(col || "0", 10);
+            rows.sort(function (a, b) {
+              const aCell = a.children[colIdx];
+              const bCell = b.children[colIdx];
+              const aVal = aCell ? aCell.getAttribute("data-sort-value") || "" : "";
+              const bVal = bCell ? bCell.getAttribute("data-sort-value") || "" : "";
+              let cmp;
+              if (type === "number") {
+                cmp = parseFloat(aVal) - parseFloat(bVal);
+              } else {
+                cmp = aVal.localeCompare(bVal);
+              }
+              return dir === "desc" ? -cmp : cmp;
+            });
+            rows.forEach(function (r) { tbody.appendChild(r); });
           });
         });
       });
@@ -871,39 +1001,71 @@ function renderGroupTable(
     return `<p class="empty">No data.</p>`;
   }
   const showMessages = messageCounts !== undefined;
-  const rows = s.groups
+
+  // Pre-sort rows by Total descending so the table ships in the most
+  // interesting order on first paint. The sort-indicator and <table>
+  // data attributes below reflect this initial state, so a user's first
+  // click on "Total" flips it to ascending (instead of re-descending).
+  const sortedGroups = [...s.groups].sort(
+    (a, b) => b.totals.total_tokens - a.totals.total_tokens,
+  );
+
+  // Every <td> carries data-sort-value so the sort JS can order rows by raw
+  // numeric/string values without re-parsing the rendered text (which would
+  // break once we format numbers as "1,234,567"). Strings sort with
+  // localeCompare; numbers sort numerically.
+  const rows = sortedGroups
     .map((g) => {
       const rowAttr = selectOnClick
         ? ` class="clickable" data-select-${selectOnClick}="${escape(g.key)}"`
         : "";
+      const keyDisplay = shortenPaths ? shortenPath(g.key) : g.key;
       const keyCell = shortenPaths
-        ? `<td title="${escape(g.key)}">${escape(shortenPath(g.key))}</td>`
-        : `<td>${escape(g.key)}</td>`;
+        ? `<td title="${escape(g.key)}" data-sort-value="${escape(keyDisplay.toLowerCase())}">${escape(keyDisplay)}</td>`
+        : `<td data-sort-value="${escape(g.key.toLowerCase())}">${escape(g.key)}</td>`;
+      const msgCount = messageCounts?.get(g.key) ?? 0;
       const msgCell = showMessages
-        ? `<td class="num">${formatNumber(messageCounts!.get(g.key) ?? 0)}</td>`
+        ? `<td class="num" data-sort-value="${msgCount}">${formatNumber(msgCount)}</td>`
         : "";
       return `<tr${rowAttr}>
         ${keyCell}
         ${msgCell}
-        <td class="num">${formatNumber(g.totals.input_tokens)}</td>
-        <td class="num">${formatNumber(g.totals.output_tokens)}</td>
-        <td class="num">${formatNumber(g.totals.cache_creation_input_tokens)}</td>
-        <td class="num">${formatNumber(g.totals.cache_read_input_tokens)}</td>
-        <td class="num">${formatNumber(g.totals.total_tokens)}</td>
+        <td class="num" data-sort-value="${g.totals.input_tokens}">${formatNumber(g.totals.input_tokens)}</td>
+        <td class="num" data-sort-value="${g.totals.output_tokens}">${formatNumber(g.totals.output_tokens)}</td>
+        <td class="num" data-sort-value="${g.totals.cache_creation_input_tokens}">${formatNumber(g.totals.cache_creation_input_tokens)}</td>
+        <td class="num" data-sort-value="${g.totals.cache_read_input_tokens}">${formatNumber(g.totals.cache_read_input_tokens)}</td>
+        <td class="num" data-sort-value="${g.totals.total_tokens}">${formatNumber(g.totals.total_tokens)}</td>
       </tr>`;
     })
     .join("");
-  const msgHeader = showMessages ? `<th class="num">Messages</th>` : "";
-  return `<table>
+
+  // Headers use data-sort-col (column index as a string) + data-sort-type so
+  // the JS knows which column to sort and how. The .sort-indicator span is
+  // toggled between "", " ▼", " ▲" by JS to show the active direction.
+  // Index 0 is always the key column; when showMessages is true, index 1 is
+  // Messages and everything else shifts down by one.
+  let colIdx = 0;
+  const keyTh = `<th data-sort-col="${colIdx++}" data-sort-type="string">${escape(keyHeader)}<span class="sort-indicator"></span></th>`;
+  const msgTh = showMessages
+    ? `<th class="num" data-sort-col="${colIdx++}" data-sort-type="number">Messages<span class="sort-indicator"></span></th>`
+    : "";
+  const inputTh = `<th class="num" data-sort-col="${colIdx++}" data-sort-type="number">Input<span class="sort-indicator"></span></th>`;
+  const outputTh = `<th class="num" data-sort-col="${colIdx++}" data-sort-type="number">Output<span class="sort-indicator"></span></th>`;
+  const cacheCreateTh = `<th class="num" data-sort-col="${colIdx++}" data-sort-type="number">Cache create<span class="sort-indicator"></span></th>`;
+  const cacheReadTh = `<th class="num" data-sort-col="${colIdx++}" data-sort-type="number">Cache read<span class="sort-indicator"></span></th>`;
+  const totalColIdx = colIdx;
+  const totalTh = `<th class="num sort-active" data-sort-col="${colIdx++}" data-sort-type="number">Total<span class="sort-indicator">▼</span></th>`;
+
+  return `<table class="sortable" data-sort-col="${totalColIdx}" data-sort-dir="desc">
     <thead>
       <tr>
-        <th>${escape(keyHeader)}</th>
-        ${msgHeader}
-        <th class="num">Input</th>
-        <th class="num">Output</th>
-        <th class="num">Cache create</th>
-        <th class="num">Cache read</th>
-        <th class="num">Total</th>
+        ${keyTh}
+        ${msgTh}
+        ${inputTh}
+        ${outputTh}
+        ${cacheCreateTh}
+        ${cacheReadTh}
+        ${totalTh}
       </tr>
     </thead>
     <tbody>${rows}</tbody>
@@ -1195,9 +1357,16 @@ function renderProjectPie(
   if (total === 0 || items.length === 0) {
     return `<p class="empty">No data.</p>`;
   }
+  // Donut geometry: outer radius R and inner radius IR carve out a ring. The
+  // hole in the middle is where we drop the total-tokens label. The explode
+  // distance is how far a slice translates outward on hover / when the row
+  // it corresponds to is highlighted; tuned so motion reads clearly without
+  // the wedge detaching from the ring.
   const cx = 110;
   const cy = 110;
-  const r = 100;
+  const R = 100;
+  const IR = 62;
+  const EXPLODE = 8;
   const wedges: string[] = [];
   const legendItems: string[] = [];
   // Start at 12 o'clock and go clockwise (matches what most users expect
@@ -1219,21 +1388,44 @@ function renderProjectPie(
     const keyAttr = escape(key);
 
     if (items.length === 1) {
+      // Single slice: drawing a donut ring with path math is fiddly because
+      // an arc from point P back to P collapses. Easiest trick is a circle
+      // of radius (R+IR)/2 stroked with width (R-IR) — no fill. Inline
+      // style is used so `stroke-width` beats the `.slice { stroke-width: 2 }`
+      // rule (CSS > attributes in modern browsers).
+      const midR = (R + IR) / 2;
+      const strokeW = R - IR;
       wedges.push(
-        `<circle class="slice" cx="${cx}" cy="${cy}" r="${r}" fill="${color}" data-key="${keyAttr}" data-label="${labelAttr}" data-value="${valueAttr}"></circle>`,
+        `<circle class="slice" cx="${cx}" cy="${cy}" r="${midR}" fill="none" style="stroke: ${color}; stroke-width: ${strokeW}px;" data-key="${keyAttr}" data-label="${labelAttr}" data-value="${valueAttr}"></circle>`,
       );
     } else {
+      // Donut-wedge path: outer arc forward, drop to inner radius, inner
+      // arc back, close. Inner arc sweeps in the opposite direction (flag
+      // "0") so the path encloses the ring segment rather than crossing
+      // through the center.
       const frac = value / total;
       const a = frac * Math.PI * 2;
-      const x1 = cx + r * Math.cos(angle);
-      const y1 = cy + r * Math.sin(angle);
-      angle += a;
-      const x2 = cx + r * Math.cos(angle);
-      const y2 = cy + r * Math.sin(angle);
+      const start = angle;
+      const end = angle + a;
+      const mid = start + a / 2;
+      const x1o = cx + R * Math.cos(start);
+      const y1o = cy + R * Math.sin(start);
+      const x2o = cx + R * Math.cos(end);
+      const y2o = cy + R * Math.sin(end);
+      const x1i = cx + IR * Math.cos(start);
+      const y1i = cy + IR * Math.sin(start);
+      const x2i = cx + IR * Math.cos(end);
+      const y2i = cy + IR * Math.sin(end);
       const largeArc = a > Math.PI ? 1 : 0;
-      const d = `M${cx},${cy} L${x1.toFixed(3)},${y1.toFixed(3)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(3)},${y2.toFixed(3)} Z`;
+      const d = `M${x1o.toFixed(3)},${y1o.toFixed(3)} A${R},${R} 0 ${largeArc} 1 ${x2o.toFixed(3)},${y2o.toFixed(3)} L${x2i.toFixed(3)},${y2i.toFixed(3)} A${IR},${IR} 0 ${largeArc} 0 ${x1i.toFixed(3)},${y1i.toFixed(3)} Z`;
+      // Precompute the per-slice explode vector as CSS custom properties.
+      // The CSS hover / .highlighted rule reads --ex/--ey and translates
+      // the wedge along its angle bisector so it appears to pop outward.
+      const tx = Math.cos(mid) * EXPLODE;
+      const ty = Math.sin(mid) * EXPLODE;
+      angle = end;
       wedges.push(
-        `<path class="slice" d="${d}" fill="${color}" data-key="${keyAttr}" data-label="${labelAttr}" data-value="${valueAttr}"></path>`,
+        `<path class="slice" d="${d}" fill="${color}" style="--ex: ${tx.toFixed(2)}px; --ey: ${ty.toFixed(2)}px;" data-key="${keyAttr}" data-label="${labelAttr}" data-value="${valueAttr}"></path>`,
       );
     }
 
@@ -1242,8 +1434,17 @@ function renderProjectPie(
     );
   }
 
+  // Center label — big compact total + unit. Sits in the donut hole with
+  // pointer-events disabled so it doesn't block hover/click on the slices
+  // behind it (visually there's nothing behind, but the text bounding box
+  // extends over wedge edges on narrow slices at 12 o'clock).
+  const centerText = `
+    <text x="${cx}" y="${cy + 3}" text-anchor="middle" class="donut-total">${escape(formatCompact(total))}</text>
+    <text x="${cx}" y="${cy + 20}" text-anchor="middle" class="donut-unit">${escape(unit)}</text>
+  `;
+
   return `<div class="pie-chart">
-    <svg viewBox="0 0 220 220" width="220" height="220">${wedges.join("")}</svg>
+    <svg viewBox="0 0 220 220" width="220" height="220">${wedges.join("")}${centerText}</svg>
     <ul class="pie-legend">${legendItems.join("")}</ul>
   </div>`;
 }

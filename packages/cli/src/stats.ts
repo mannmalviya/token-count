@@ -6,9 +6,10 @@
 //     (tests, future SDK) can skip the string.
 //   - index.ts wires commander flags into runStats and prints the output.
 //
-// We render the table by hand (a few padStart/padEnd calls) instead of
-// pulling in a dependency — it keeps long project paths from getting
-// truncated by a library's column-sizing heuristics.
+// We render the table by hand (padStart/padEnd + a handful of box-drawing
+// characters) instead of pulling in a dependency — it keeps long project
+// paths from getting truncated by a library's column-sizing heuristics,
+// and lets us keep the Claude-orange accent on the header row.
 
 import {
   readAllPrompts,
@@ -20,7 +21,7 @@ import {
   type TotalsBlock,
   type UsageRecord,
 } from "@token-count/core";
-import { accentBold, dim } from "./color.js";
+import { accent, accentBold, dim } from "./color.js";
 
 export interface StatsOptions {
   by: GroupBy;
@@ -84,7 +85,9 @@ export function runStats(opts: StatsOptions): StatsResult {
   const body = summary.groups.map((g) =>
     row(g.key, g.totals, messageCounts.get(g.key) ?? 0, opts.cost),
   );
-  const footer = row("all", summary.totals, totalMessages, opts.cost);
+  // Totals live as the final row of the same table (matches the image mock).
+  // Merging avoids a second header just to carry one row.
+  const totalRow = row("Total", summary.totals, totalMessages, opts.cost);
 
   // When --cost is active, print a one-line reminder under the totals so the
   // number doesn't look like a bill. See pricing.ts for the rate source.
@@ -97,12 +100,7 @@ export function runStats(opts: StatsOptions): StatsResult {
       "\n"
     : "";
 
-  const output =
-    renderTable(header, body) +
-    "\n" +
-    renderTable(["Totals", ...header.slice(1)], [footer]) +
-    costNote +
-    "\n";
+  const output = renderTable(header, body, totalRow) + costNote + "\n";
 
   return { summary, output };
 }
@@ -206,34 +204,62 @@ function fmtCost(usd: number): string {
 }
 
 /**
- * Render a simple left/right-aligned text table. First column is left-aligned
- * (labels, paths), numeric columns are right-aligned for easy eyeballing.
+ * Render a bordered text table using Unicode box-drawing characters. First
+ * column is left-aligned (labels, paths), numeric columns are right-aligned
+ * for easy eyeballing.
+ *
+ * Layout per cell: one space of horizontal padding on each side, then the
+ * content padded to the column's max width. Every row is separated from the
+ * next with a ├─┼─┤ divider (matches the mock we're copying). The border
+ * characters are dimmed so numbers read as the primary content; the header
+ * row is accent-colored (terracotta + bold) to pop.
  *
  * Coloring is applied AFTER padding so ANSI escape codes don't inflate the
  * string length that `padStart`/`padEnd` use to compute column widths.
- * Otherwise headers and totals would misalign by ~10 invisible characters
- * per cell. Only the header row is accent-colored — data rows stay plain
- * so numbers remain easy to scan.
+ * Otherwise cells would misalign by ~10 invisible characters each.
  */
-function renderTable(header: string[], rows: string[][]): string {
-  const allRows = [header, ...rows];
+function renderTable(
+  header: string[],
+  rows: string[][],
+  totalRow?: string[],
+): string {
+  // Column widths must consider every row (including the total row, which
+  // often has the largest numbers) so padding lines up end-to-end.
+  const allRows = totalRow ? [header, ...rows, totalRow] : [header, ...rows];
   const widths = header.map((_, i) =>
     Math.max(...allRows.map((r) => (r[i] ?? "").length)),
   );
 
-  const sep = "  "; // two-space column separator — visually clean, no box drawing
-  const lines: string[] = [];
+  // Each column's horizontal run, including one space of padding on each
+  // side of the cell content. `segments` is reused for the top, middle,
+  // and bottom dividers — they only differ in the junction glyphs.
+  const segments = widths.map((w) => "─".repeat(w + 2));
+  const top = dim("┌" + segments.join("┬") + "┐");
+  const mid = dim("├" + segments.join("┼") + "┤");
+  const bot = dim("└" + segments.join("┴") + "┘");
+  const bar = dim("│");
 
+  const lines: string[] = [];
+  lines.push(top);
   // Header row: bold + terracotta so the column titles read as the accent
-  // for each table.
-  lines.push(formatRow(header, widths, sep, accentBold));
-  // Divider: dimmed so it recedes compared to the numbers. Still visually
-  // separates the header from the data.
-  lines.push(
-    dim(widths.map((w) => "-".repeat(w)).join(sep)),
-  );
+  // for the whole table.
+  lines.push(formatRow(header, widths, bar, accentBold));
+  lines.push(mid);
   // Data rows: plain — leaving numbers uncolored keeps long tables scannable.
-  for (const r of rows) lines.push(formatRow(r, widths, sep));
+  // A ├─┼─┤ divider goes between every pair of rows to match the mock.
+  for (let i = 0; i < rows.length; i++) {
+    lines.push(formatRow(rows[i]!, widths, bar));
+    if (i < rows.length - 1) lines.push(mid);
+  }
+  // Total row (optional): rendered in the Claude-orange accent so the
+  // grand total stands apart from per-group rows at a glance. Non-bold —
+  // the header is already bold, so accent-only gives a readable hierarchy
+  // (header = punchy, total = highlighted, data = plain).
+  if (totalRow) {
+    if (rows.length > 0) lines.push(mid);
+    lines.push(formatRow(totalRow, widths, bar, accent));
+  }
+  lines.push(bot);
 
   return lines.join("\n") + "\n";
 }
@@ -241,16 +267,18 @@ function renderTable(header: string[], rows: string[][]): string {
 function formatRow(
   cells: string[],
   widths: number[],
-  sep: string,
+  bar: string,
   styler?: (s: string) => string,
 ): string {
-  return cells
-    .map((cell, i) => {
-      const w = widths[i]!;
-      // First column = labels (left-aligned). Rest = numbers (right-aligned).
-      const padded = i === 0 ? cell.padEnd(w) : cell.padStart(w);
-      return styler ? styler(padded) : padded;
-    })
-    .join(sep)
-    .trimEnd();
+  // Each cell is " <padded-content> " (one-space left + right padding),
+  // wrapped by vertical bars. Using the bar glyph as both outer border
+  // and column separator means the output lines up with the ┌─┬─┐ header.
+  const parts = cells.map((cell, i) => {
+    const w = widths[i]!;
+    // First column = labels (left-aligned). Rest = numbers (right-aligned).
+    const padded = i === 0 ? cell.padEnd(w) : cell.padStart(w);
+    const styled = styler ? styler(padded) : padded;
+    return " " + styled + " ";
+  });
+  return bar + parts.join(bar) + bar;
 }

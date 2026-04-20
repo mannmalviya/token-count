@@ -610,6 +610,24 @@ function renderHtml(
     gap: 8px;
     font-size: 12px;
     line-height: 1.6;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    transition: background 0.1s, border-color 0.15s;
+  }
+  /* Clickable legend rows — cursor + subtle hover tint so users discover
+     that the legend is interactive. "Other" stays non-clickable (no class)
+     since it's an aggregate of many projects. */
+  .pie-legend li.clickable { cursor: pointer; }
+  .pie-legend li.clickable:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04));
+  }
+  /* Applied by JS when a project is selected (via legend, slice, or the
+     filter dropdown). Tinted with the Claude accent so it matches the
+     wedge drop-shadow on the pie — the two highlights read as one thing. */
+  .pie-legend li.highlighted {
+    background: var(--tc-accent-soft);
+    border-color: var(--tc-accent);
   }
   .pie-legend .swatch {
     display: inline-block;
@@ -733,13 +751,18 @@ function renderHtml(
         }
         return fallback;
       }
-      // Highlight (or un-highlight) a project across both pie variants. The
-      // full project path is stored on each slice as data-key so we don't
-      // have to deal with shortened display names.
+      // Highlight (or un-highlight) a project across both pie variants —
+      // both the slice and its legend row get the "highlighted" class. The
+      // full project path is stored on each as data-key so we don't have to
+      // deal with shortened display names.
       function highlightPie(projectKey) {
         document.querySelectorAll(".pie-panel .slice").forEach(function (s) {
           const match = projectKey && s.getAttribute("data-key") === projectKey;
           s.classList.toggle("highlighted", !!match);
+        });
+        document.querySelectorAll(".pie-legend .legend-item").forEach(function (li) {
+          const match = projectKey && li.getAttribute("data-key") === projectKey;
+          li.classList.toggle("highlighted", !!match);
         });
       }
       function update() {
@@ -806,24 +829,37 @@ function renderHtml(
         });
       });
 
-      // Clicking a pie slice filters the top chart by that project — same
-      // behavior as clicking its row in the By project table. The "Other"
-      // aggregate wedge is skipped because it isn't a single real project.
-      // Only slices whose project exists as an <option> in the project
-      // dropdown are actionable (guards against stale data).
-      document.querySelectorAll(".pie-panel .slice").forEach(function (slice) {
-        slice.addEventListener("click", function () {
-          const key = slice.getAttribute("data-key");
-          if (!key || key === "Other") return;
-          const hasOption = Array.from(projectSel.options).some(function (o) {
-            return o.value === key;
-          });
-          if (!hasOption) return;
+      // Clicking a pie slice — or its matching legend row — filters the top
+      // chart by that project. Same behavior as clicking its row in the By
+      // project table. The "Other" aggregate wedge/legend row is skipped
+      // because it isn't a single real project. Only keys that exist as an
+      // <option> in the project dropdown are actionable (guards against
+      // stale data). Clicking the already-selected project toggles back to
+      // "all" so users can easily clear the filter from the pie.
+      function selectProjectFromPie(key) {
+        if (!key || key === "Other") return;
+        const hasOption = Array.from(projectSel.options).some(function (o) {
+          return o.value === key;
+        });
+        if (!hasOption) return;
+        if (projectSel.value === key) {
+          projectSel.value = ALL;
+        } else {
           projectSel.value = key;
           modelSel.value = ALL;
-          update();
-          const heading = document.getElementById("tokens-per-day");
-          if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        update();
+        const heading = document.getElementById("tokens-per-day");
+        if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      document.querySelectorAll(".pie-panel .slice").forEach(function (slice) {
+        slice.addEventListener("click", function () {
+          selectProjectFromPie(slice.getAttribute("data-key"));
+        });
+      });
+      document.querySelectorAll(".pie-legend .legend-item.clickable").forEach(function (li) {
+        li.addEventListener("click", function () {
+          selectProjectFromPie(li.getAttribute("data-key"));
         });
       });
     })();
@@ -1443,8 +1479,13 @@ function renderProjectPie(
       );
     }
 
+    // Legend entries carry data-key so the click handler can match them to
+    // the dropdown + pie slice using the same logic we use for slice clicks.
+    // "Other" is an aggregate — not a real project — so we leave its li
+    // without the clickable class (CSS keeps the default cursor on it).
+    const legendClass = key === "Other" ? "" : " clickable";
     legendItems.push(
-      `<li><span class="swatch" style="background: ${color};"></span><span class="name" title="${escape(key)}">${escape(displayKey)}</span><span class="val">${formatNumber(value)} ${escape(unit)} · ${pctLabel}</span></li>`,
+      `<li class="legend-item${legendClass}" data-key="${keyAttr}"><span class="swatch" style="background: ${color};"></span><span class="name" title="${escape(key)}">${escape(displayKey)}</span><span class="val">${formatNumber(value)} ${escape(unit)} · ${pctLabel}</span></li>`,
     );
   }
 

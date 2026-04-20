@@ -11,6 +11,7 @@
     <img src="https://img.shields.io/badge/pnpm-workspaces-F69220?logo=pnpm&logoColor=white" alt="pnpm workspaces" />
     <img src="https://img.shields.io/badge/local--first-no%20cloud-D97757" alt="Local-first" />
     <img src="https://img.shields.io/badge/VSCode-extension-007ACC?logo=visualstudiocode&logoColor=white" alt="VSCode extension" />
+    <img src="https://img.shields.io/github/repo-size/mannmalviya/token-count?label=install%20size&color=D97757" alt="Install size" />
     <a href="https://deepwiki.com/mannmalviya/token-count"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a>
 </p>
 
@@ -18,9 +19,14 @@
 
 ## ⚡ Quick Start
 
+> **Prereq:** Node ≥18.17 and `pnpm` on your `PATH`. If you don't have pnpm:
+> `corepack enable && pnpm setup` (then open a new shell so pnpm's global
+> bin dir is on `$PATH`, otherwise step 3's `link --global` won't expose
+> the `token-count` binary).
+
 ```bash
 # 1. Clone and build
-git clone <this-repo> token-count && cd token-count
+git clone https://github.com/mannmalviya/token-count.git && cd token-count
 pnpm install && pnpm -r build
 
 # 2. Put the `token-count` binary on your PATH

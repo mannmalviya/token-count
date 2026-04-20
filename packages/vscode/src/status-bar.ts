@@ -9,6 +9,7 @@
 
 import * as vscode from "vscode";
 import { readAllRecords, summarize } from "@token-count/core";
+import { formatCount, startOfTodayUTC } from "./format.js";
 
 /**
  * Small wrapper around a VSCode StatusBarItem. The class exists so we can
@@ -55,31 +56,3 @@ export class StatusBarController {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Midnight UTC of today, used as the `since` bound so "today" means "records
- * whose day bucket is today in UTC". We intentionally use UTC so that the
- * status bar matches the aggregation in the CLI and the dashboard — mixing
- * time zones would produce numbers that disagree.
- */
-function startOfTodayUTC(): Date {
-  const now = new Date();
-  return new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-}
-
-/**
- * Humanize a token count. Examples:
- *   987       → "987"
- *   12400     → "12.4k"
- *   1500000   → "1.5M"
- */
-function formatCount(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
-}

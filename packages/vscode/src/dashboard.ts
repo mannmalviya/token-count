@@ -61,7 +61,6 @@ export class DashboardPanel {
    * whenever the file changes (via FileSystemWatcher).
    */
   refresh(): void {
-    if (!DashboardPanel.current) return;
     try {
       const records = readAllRecords();
       const prompts = readAllPrompts();
@@ -123,6 +122,44 @@ function renderHtml(
   const byModel = summarize(records, { groupBy: "model" });
   const byProject = summarize(records, { groupBy: "project" });
 
+  // --- Prompt counts per model / project. ---------------------------------
+  // Prompts record session_id and cwd but not model. We approximate
+  // "messages to model X" by: for each session, pick the model with the
+  // most assistant turns in that session, then attribute every prompt in
+  // that session to that model. This matches the common case where a
+  // session sticks to one model; mixed-model sessions only misattribute
+  // the minority-model prompts.
+  const tallyBySession = new Map<string, Map<string, number>>();
+  for (const r of records) {
+    let tally = tallyBySession.get(r.session_id);
+    if (!tally) {
+      tally = new Map();
+      tallyBySession.set(r.session_id, tally);
+    }
+    tally.set(r.model, (tally.get(r.model) ?? 0) + 1);
+  }
+  const primaryModelBySession = new Map<string, string>();
+  for (const [sid, tally] of tallyBySession) {
+    let top = "";
+    let topCount = -1;
+    for (const [model, count] of tally) {
+      if (count > topCount) {
+        top = model;
+        topCount = count;
+      }
+    }
+    primaryModelBySession.set(sid, top);
+  }
+  const messagesByModel = new Map<string, number>();
+  const messagesByProject = new Map<string, number>();
+  for (const p of prompts) {
+    const model = primaryModelBySession.get(p.session_id);
+    if (model) {
+      messagesByModel.set(model, (messagesByModel.get(model) ?? 0) + 1);
+    }
+    messagesByProject.set(p.cwd, (messagesByProject.get(p.cwd) ?? 0) + 1);
+  }
+
   // --- Headline counts. ---------------------------------------------------
   // "API calls" = one per assistant response in the transcript. Each tool-use
   // round trip is its own response, so this number is much bigger than the
@@ -154,11 +191,19 @@ function renderHtml(
     new Date(earliestMs).getUTCMonth(),
     new Date(earliestMs).getUTCDate(),
   );
-  const ranges: { id: string; label: string; startMs: number }[] = [
-    { id: "week", label: "Past week", startMs: startOfTodayUTC - 6 * DAY_MS },
-    { id: "month", label: "Past month", startMs: startOfTodayUTC - 29 * DAY_MS },
-    { id: "year", label: "Past year", startMs: startOfTodayUTC - 364 * DAY_MS },
-    { id: "all", label: "All time", startMs: earliestDayUTC },
+  // `bucketDays` is how many consecutive days each bar represents. The past
+  // year view rolls up to weekly bars so the chart doesn't become a dense
+  // 365-bar wall; shorter views stay daily.
+  const ranges: {
+    id: string;
+    label: string;
+    startMs: number;
+    bucketDays: number;
+  }[] = [
+    { id: "week", label: "Past week", startMs: startOfTodayUTC - 6 * DAY_MS, bucketDays: 1 },
+    { id: "month", label: "Past month", startMs: startOfTodayUTC - 29 * DAY_MS, bucketDays: 1 },
+    { id: "year", label: "Past year", startMs: startOfTodayUTC - 364 * DAY_MS, bucketDays: 7 },
+    { id: "all", label: "All time", startMs: earliestDayUTC, bucketDays: 1 },
   ];
 
   // Default selection: month (matches the previous "Last 30 days" view).
@@ -199,7 +244,7 @@ function renderHtml(
           since: new Date(r.startMs),
         });
         const hidden = r.id === defaultId && m === ALL_MODELS ? "" : " hidden";
-        return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}">${renderBarChart(s, r.startMs, startOfTodayUTC)}</div>`;
+        return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}">${renderBarChart(s, r.startMs, startOfTodayUTC, r.bucketDays)}</div>`;
       }),
     )
     .join("");
@@ -219,6 +264,7 @@ function renderHtml(
     line-height: 1.5;
   }
   h1, h2 { font-weight: 500; margin-top: 24px; }
+  h1 { display: flex; align-items: center; gap: 10px; }
   .totals { display: flex; gap: 32px; margin: 16px 0 32px; flex-wrap: wrap; }
   .totals .card {
     background: var(--vscode-editorWidget-background);
@@ -305,10 +351,26 @@ function renderHtml(
   .stats .stat { display: flex; flex-direction: column; }
   .stats .stat .label { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
   .stats .stat .value { font-size: 16px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+  /* Live-dot next to the heading. Signals that the dashboard auto-refreshes
+     when usage.jsonl changes (the extension watches the file). */
+  .live-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #22c55e;
+    animation: tc-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes tc-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+    70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
 </style>
 </head>
 <body>
-  <h1>Token Count</h1>
+  <h1>Token Count<span class="live-dot" title="Live — auto-refreshes as you use Claude Code" aria-hidden="true"></span></h1>
   ${records.length === 0 ? `<p class="empty">No usage recorded yet. Start a Claude Code session — records show up here automatically.</p>` : ""}
   <div class="totals">
     ${totalCard("Today", today.totals)}
@@ -337,10 +399,10 @@ function renderHtml(
   <div id="chart-tooltip" role="tooltip" aria-hidden="true"></div>
 
   <h2 id="by-model">By model</h2>
-  ${renderGroupTable("Model", byModel, "model")}
+  ${renderGroupTable("Model", byModel, "model", false, messagesByModel)}
 
   <h2>By project</h2>
-  ${renderGroupTable("Project", byProject, undefined, true)}
+  ${renderGroupTable("Project", byProject, undefined, true, messagesByProject)}
 
   <script>
     // Timeframe + model toggle. All (range × model) chart panels are already
@@ -437,10 +499,14 @@ function renderGroupTable(
   // with ".../", and the full path shows up in a tooltip. Handy for the
   // project table where "/home/mann/..." eats horizontal space.
   shortenPaths?: boolean,
+  // Optional map of key → user-message count. When supplied, a "Messages"
+  // column is inserted between the key and the token columns.
+  messageCounts?: Map<string, number>,
 ): string {
   if (s.groups.length === 0) {
     return `<p class="empty">No data.</p>`;
   }
+  const showMessages = messageCounts !== undefined;
   const rows = s.groups
     .map((g) => {
       const rowAttr = selectOnClick
@@ -449,8 +515,12 @@ function renderGroupTable(
       const keyCell = shortenPaths
         ? `<td title="${escape(g.key)}">${escape(shortenPath(g.key))}</td>`
         : `<td>${escape(g.key)}</td>`;
+      const msgCell = showMessages
+        ? `<td class="num">${formatNumber(messageCounts!.get(g.key) ?? 0)}</td>`
+        : "";
       return `<tr${rowAttr}>
         ${keyCell}
+        ${msgCell}
         <td class="num">${formatNumber(g.totals.input_tokens)}</td>
         <td class="num">${formatNumber(g.totals.output_tokens)}</td>
         <td class="num">${formatNumber(g.totals.cache_creation_input_tokens)}</td>
@@ -459,10 +529,12 @@ function renderGroupTable(
       </tr>`;
     })
     .join("");
+  const msgHeader = showMessages ? `<th class="num">Messages</th>` : "";
   return `<table>
     <thead>
       <tr>
         <th>${escape(keyHeader)}</th>
+        ${msgHeader}
         <th class="num">Input</th>
         <th class="num">Output</th>
         <th class="num">Cache create</th>
@@ -475,19 +547,37 @@ function renderGroupTable(
 }
 
 /**
- * Render an inline-SVG bar chart of tokens-per-day. We walk the full 30-day
- * window (not just the days we have data for) so the chart doesn't lie about
- * "quiet days" by skipping them.
+ * Render an inline-SVG bar chart of tokens per bucket. `bucketDays` controls
+ * how many consecutive days each bar covers — 1 for daily, 7 for weekly, etc.
+ * We walk the full window (not just days with data) so the chart doesn't lie
+ * about "quiet days" by skipping them.
  */
-function renderBarChart(summary: Summary, startMs: number, endMs: number): string {
+function renderBarChart(
+  summary: Summary,
+  startMs: number,
+  endMs: number,
+  bucketDays: number = 1,
+): string {
+  const DAY_MS = 24 * 60 * 60 * 1000;
   // Build a map from "YYYY-MM-DD" → total_tokens for O(1) lookup.
   const byDay = new Map(summary.groups.map((g) => [g.key, g.totals.total_tokens]));
 
-  // Enumerate each day in the [startMs, endMs] inclusive range.
-  const days: { key: string; value: number }[] = [];
-  for (let d = startMs; d <= endMs; d += 24 * 60 * 60 * 1000) {
-    const key = new Date(d).toISOString().slice(0, 10);
-    days.push({ key, value: byDay.get(key) ?? 0 });
+  // Each `day` here is actually a bucket — one bar on the chart. When
+  // bucketDays === 1 it's literally one day; when it's 7 it's a week's sum.
+  // We keep the variable name `days` to minimize downstream churn; the
+  // `label` field is what the tooltip displays.
+  const days: { key: string; label: string; value: number }[] = [];
+  for (let bstart = startMs; bstart <= endMs; bstart += bucketDays * DAY_MS) {
+    const bend = Math.min(bstart + (bucketDays - 1) * DAY_MS, endMs);
+    let total = 0;
+    for (let d = bstart; d <= bend; d += DAY_MS) {
+      const key = new Date(d).toISOString().slice(0, 10);
+      total += byDay.get(key) ?? 0;
+    }
+    const startKey = new Date(bstart).toISOString().slice(0, 10);
+    const endKey = new Date(bend).toISOString().slice(0, 10);
+    const label = bucketDays === 1 ? startKey : `${startKey} to ${endKey}`;
+    days.push({ key: startKey, label, value: total });
   }
 
   const width = 900;
@@ -514,7 +604,7 @@ function renderBarChart(summary: Summary, startMs: number, endMs: number): strin
       const h = (d.value / max) * chartH;
       const x = padding.left + i * barW;
       const y = padding.top + (chartH - h);
-      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}" data-date="${escape(d.key)}" data-tokens="${formatNumber(d.value)}"></rect>`;
+      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}" data-date="${escape(d.label)}" data-tokens="${formatNumber(d.value)}"></rect>`;
     })
     .join("");
 
@@ -535,8 +625,8 @@ function renderBarChart(summary: Summary, startMs: number, endMs: number): strin
   };
 
   let labels = "";
-  if (days.length <= 31) {
-    // One weekday label per day.
+  if (bucketDays === 1 && days.length <= 31) {
+    // One weekday label per day (only meaningful for daily buckets).
     labels = days.map((d, i) => xLabel(i, weekdayOf(d.key))).join("");
   } else {
     // Pick a stride so labels sit ~60px apart; always include first + last.

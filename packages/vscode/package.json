@@ -18,7 +18,35 @@
         "command": "tokenCount.showDashboard",
         "title": "Token Count: Show Dashboard"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tokenCount",
+          "title": "Token Count",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "tokenCount": [
+        {
+          "type": "webview",
+          "id": "tokenCount.sidebar",
+          "name": "Usage Summary"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Token Count",
+      "properties": {
+        "tokenCount.rightStatusBar.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a second status bar item on the right with a rich hover tooltip quick-peek."
+        }
+      }
+    }
   },
   "categories": ["Other"],
   "scripts": {

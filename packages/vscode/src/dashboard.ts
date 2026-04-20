@@ -229,25 +229,150 @@ function renderHtml(
     ),
   ].join("");
 
-  // Pre-render every (timeframe × model) combination so switching either
-  // dropdown is instant in the browser. Data volume is tiny — at most a few
-  // dozen panels of inline SVG — so this is cheaper than round-tripping to
-  // the extension host on every change.
-  const modelKeys = [ALL_MODELS, ...modelList];
-  const panels = ranges
-    .flatMap((r) =>
-      modelKeys.map((m) => {
-        const filtered =
-          m === ALL_MODELS ? records : records.filter((rec) => rec.model === m);
-        const s = summarize(filtered, {
-          groupBy: "day",
-          since: new Date(r.startMs),
-        });
-        const hidden = r.id === defaultId && m === ALL_MODELS ? "" : " hidden";
-        return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}">${renderBarChart(s, r.startMs, startOfTodayUTC, r.bucketDays)}</div>`;
-      }),
+  // Chart-type toggle. "bars" is the historical default; "line" draws a
+  // connected line with an area fill and hover dots on each data point.
+  // Rendered as a two-button segmented control, not a dropdown, so the
+  // active mode is visible at a glance and switching is one click.
+  const chartTypes = ["bars", "line"] as const;
+  const defaultChart: (typeof chartTypes)[number] = "bars";
+  const chartToggle = chartTypes
+    .map(
+      (c) =>
+        `<button type="button" class="toggle-btn${c === defaultChart ? " active" : ""}" data-chart="${c}">${c === "bars" ? "Bars" : "Line"}</button>`,
     )
     .join("");
+
+  // Metric toggle — tokens (historical default) vs. user-message counts.
+  // Messages are attributed to models via each session's primary model, the
+  // same heuristic used by the by-model table further down the page.
+  const metrics = ["tokens", "messages"] as const;
+  const defaultMetric: (typeof metrics)[number] = "tokens";
+  const metricToggle = metrics
+    .map(
+      (m) =>
+        `<button type="button" class="toggle-btn${m === defaultMetric ? " active" : ""}" data-metric="${m}">${m === "tokens" ? "Tokens" : "Messages"}</button>`,
+    )
+    .join("");
+  // Second copy of the same toggle, with its own id, used to drive the
+  // project pie chart below. Kept separate so flipping one doesn't affect
+  // the other — the line/bar chart lives up top with its own filters.
+  const pieMetricToggle = metrics
+    .map(
+      (m) =>
+        `<button type="button" class="toggle-btn${m === defaultMetric ? " active" : ""}" data-metric="${m}">${m === "tokens" ? "Tokens" : "Messages"}</button>`,
+    )
+    .join("");
+
+  // Project pie data. Sorted descending, top 8 kept as-is and the tail is
+  // rolled up into an "Other" wedge so the chart stays readable no matter
+  // how many projects you've touched.
+  const PIE_TOP_N = 8;
+  const topNWithOther = (pairs: [string, number][]): [string, number][] => {
+    const sorted = [...pairs].sort((a, b) => b[1] - a[1]);
+    if (sorted.length <= PIE_TOP_N) return sorted.filter(([, v]) => v > 0);
+    const top = sorted.slice(0, PIE_TOP_N);
+    const rest = sorted.slice(PIE_TOP_N);
+    const otherSum = rest.reduce((s, [, v]) => s + v, 0);
+    if (otherSum > 0) top.push(["Other", otherSum]);
+    return top.filter(([, v]) => v > 0);
+  };
+  const pieTokens = topNWithOther(
+    byProject.groups.map((g): [string, number] => [g.key, g.totals.total_tokens]),
+  );
+  const pieMessages = topNWithOther(
+    Array.from(messagesByProject.entries()),
+  );
+
+  // Project filter. Mirrors the model filter: a dropdown with an "All"
+  // sentinel plus every distinct cwd we've seen. Pre-rendering panels for
+  // every (model × project) pair would multiply our panel count by ~P, so
+  // instead we treat the two filters as mutually exclusive — picking a
+  // project resets the model to "all" and vice versa. That halves the work
+  // and avoids empty intersections that would be confusing to display.
+  const ALL_PROJECTS = "__all__";
+  const projectList = Array.from(new Set(records.map((r) => r.cwd))).sort();
+  const projectOptions = [
+    `<option value="${ALL_PROJECTS}" selected>All projects</option>`,
+    ...projectList.map(
+      (p) => `<option value="${escape(p)}" title="${escape(p)}">${escape(shortenPath(p))}</option>`,
+    ),
+  ].join("");
+
+  // Helper that builds a single chart panel. Factored out so we can emit two
+  // families of panels (per-model and per-project) without duplicating the
+  // byDay + svg logic.
+  const modelKeys = [ALL_MODELS, ...modelList];
+  const buildPanel = (
+    r: (typeof ranges)[number],
+    m: string,
+    pk: string,
+    c: (typeof chartTypes)[number],
+    metric: (typeof metrics)[number],
+  ): string => {
+    // Tokens: sum total_tokens per day from filtered records. Messages:
+    // count prompts per day. Both respect the model filter (via primary
+    // model per session for prompts) and the project filter.
+    let byDay: Map<string, number>;
+    if (metric === "tokens") {
+      let filtered = records;
+      if (m !== ALL_MODELS) filtered = filtered.filter((rec) => rec.model === m);
+      if (pk !== ALL_PROJECTS) filtered = filtered.filter((rec) => rec.cwd === pk);
+      const s = summarize(filtered, {
+        groupBy: "day",
+        since: new Date(r.startMs),
+      });
+      byDay = new Map(s.groups.map((g) => [g.key, g.totals.total_tokens]));
+    } else {
+      byDay = new Map();
+      for (const p of prompts) {
+        const ts = Date.parse(p.ts);
+        if (ts < r.startMs) continue;
+        if (m !== ALL_MODELS) {
+          const primary = primaryModelBySession.get(p.session_id);
+          if (primary !== m) continue;
+        }
+        if (pk !== ALL_PROJECTS && p.cwd !== pk) continue;
+        const day = new Date(ts).toISOString().slice(0, 10);
+        byDay.set(day, (byDay.get(day) ?? 0) + 1);
+      }
+    }
+    const unit = metric === "tokens" ? "tokens" : "msgs";
+    const hidden =
+      r.id === defaultId &&
+      m === ALL_MODELS &&
+      pk === ALL_PROJECTS &&
+      c === defaultChart &&
+      metric === defaultMetric
+        ? ""
+        : " hidden";
+    const svg =
+      c === "bars"
+        ? renderBarChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit)
+        : renderLineChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit);
+    return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}" data-project="${escape(pk)}" data-chart="${c}" data-metric="${metric}">${svg}</div>`;
+  };
+
+  // Family (1): every model at project=All. Existing behavior.
+  // Family (2): every project at model=All. New per-project panels.
+  // Together they cover every legal filter combination the UI can produce.
+  const panelParts: string[] = [];
+  for (const r of ranges) {
+    for (const m of modelKeys) {
+      for (const c of chartTypes) {
+        for (const metric of metrics) {
+          panelParts.push(buildPanel(r, m, ALL_PROJECTS, c, metric));
+        }
+      }
+    }
+    for (const pk of projectList) {
+      for (const c of chartTypes) {
+        for (const metric of metrics) {
+          panelParts.push(buildPanel(r, ALL_MODELS, pk, c, metric));
+        }
+      }
+    }
+  }
+  const panels = panelParts.join("");
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -290,6 +415,15 @@ function renderHtml(
   .empty { opacity: 0.6; margin: 32px 0; }
   svg .bar { fill: var(--vscode-charts-blue, #4a9eff); }
   svg .bar:hover { fill: var(--vscode-charts-orange, #e8a33d); }
+  svg .line {
+    fill: none;
+    stroke: var(--vscode-charts-blue, #4a9eff);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  svg .area { fill: var(--vscode-charts-blue, #4a9eff); fill-opacity: 0.15; }
+  svg circle.bar { stroke: var(--vscode-editor-background); stroke-width: 1.5; }
   svg .axis { stroke: var(--vscode-editorWidget-border); }
   svg .grid {
     stroke: var(--vscode-editorWidget-border);
@@ -336,6 +470,108 @@ function renderHtml(
     outline-offset: -1px;
   }
   .chart-panel.hidden { display: none; }
+
+  /* Segmented toggle for chart type. Two buttons rendered side-by-side with
+     shared borders so they read as one control; the active one fills with
+     the VSCode button color. */
+  .toggle-group {
+    display: inline-flex;
+    vertical-align: middle;
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .toggle-btn {
+    background: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: none;
+    padding: 4px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .toggle-btn + .toggle-btn {
+    border-left: 1px solid var(--vscode-dropdown-border, var(--vscode-editorWidget-border));
+  }
+  .toggle-btn:hover:not(.active) {
+    background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04));
+  }
+  .toggle-btn.active {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  .toggle-btn:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+
+  /* Project pie chart: SVG on the left, color-matched legend on the right.
+     Wraps on narrow windows so the legend slides under the pie. */
+  .pie-panel.hidden { display: none; }
+  .pie-chart {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    margin: 12px 0 24px;
+    padding: 16px;
+    background: var(--vscode-editorWidget-background);
+    border: 1px solid var(--vscode-editorWidget-border);
+    border-radius: 6px;
+    flex-wrap: wrap;
+  }
+  .pie-chart svg { flex-shrink: 0; }
+  .pie-chart .slice {
+    stroke: var(--vscode-editor-background);
+    stroke-width: 2;
+    transition: opacity 0.1s, filter 0.15s, stroke-width 0.15s;
+  }
+  .pie-chart .slice:hover { opacity: 0.85; }
+  /* Applied by JS when the user clicks a project row — thickens the stroke
+     and brightens the wedge so the selection stands out without moving any
+     geometry around. */
+  .pie-chart .slice.highlighted {
+    stroke: var(--vscode-focusBorder, #4a9eff);
+    stroke-width: 4;
+    filter: brightness(1.12) drop-shadow(0 0 4px rgba(0, 0, 0, 0.4));
+  }
+  /* Legend uses CSS grid with auto-fit so the number of columns adapts to
+     the dashboard width: narrow pane → 1 column, wide → 3-4. Each cell is
+     at least 260px so names + numbers fit without clipping. Inside a cell
+     the name and value sit next to each other (no margin-left:auto push)
+     so there's no dead space between them. */
+  .pie-legend {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 4px 24px;
+    flex: 1;
+    min-width: 260px;
+  }
+  .pie-legend li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .pie-legend .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .pie-legend .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 200px;
+  }
+  .pie-legend .val {
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
 
   /* Compact stats row — one line of label/value pairs above the chart. */
   .stats {
@@ -394,6 +630,10 @@ function renderHtml(
     <select id="range">${options}</select>
     <label for="model" style="margin-left: 16px;">Model: </label>
     <select id="model">${modelOptions}</select>
+    <label for="project" style="margin-left: 16px;">Project: </label>
+    <select id="project">${projectOptions}</select>
+    <span class="toggle-group" role="group" aria-label="Chart type" id="chart-toggle" style="margin-left: 16px;">${chartToggle}</span>
+    <span class="toggle-group" role="group" aria-label="Metric" id="metric-toggle" style="margin-left: 8px;">${metricToggle}</span>
   </div>
   ${panels}
   <div id="chart-tooltip" role="tooltip" aria-hidden="true"></div>
@@ -401,38 +641,107 @@ function renderHtml(
   <h2 id="by-model">By model</h2>
   ${renderGroupTable("Model", byModel, "model", false, messagesByModel)}
 
+  <h2 id="project-pie">Project breakdown</h2>
+  <div class="range-select">
+    <span class="toggle-group" role="group" aria-label="Metric" id="pie-metric-toggle">${pieMetricToggle}</span>
+  </div>
+  <div class="pie-panel" data-metric="tokens">${renderProjectPie(pieTokens, "tokens")}</div>
+  <div class="pie-panel hidden" data-metric="messages">${renderProjectPie(pieMessages, "msgs")}</div>
+
   <h2>By project</h2>
-  ${renderGroupTable("Project", byProject, undefined, true, messagesByProject)}
+  ${renderGroupTable("Project", byProject, "project", true, messagesByProject)}
 
   <script>
-    // Timeframe + model toggle. All (range × model) chart panels are already
-    // in the DOM; the two <select>s just flip the "hidden" class on everything
-    // but the one whose data-range and data-model both match. No IPC to the
-    // extension, so switching is instant.
+    // Timeframe + model + chart-type toggle. All (range × model × chart)
+    // panels are already in the DOM; the three <select>s just flip the
+    // "hidden" class on everything but the one whose three data-attributes
+    // all match. No IPC to the extension, so switching is instant.
     (function () {
       const rangeSel = document.getElementById("range");
       const modelSel = document.getElementById("model");
+      const projectSel = document.getElementById("project");
+      const chartBtns = document.querySelectorAll("#chart-toggle .toggle-btn");
+      const metricBtns = document.querySelectorAll("#metric-toggle .toggle-btn");
       const panels = document.querySelectorAll(".chart-panel");
+      const ALL = "__all__";
+      // Each segmented toggle stores its value as the "active" class on one
+      // of its buttons; read it back by scanning and extracting the named
+      // data attribute.
+      function activeValue(nodes, attr, fallback) {
+        for (let i = 0; i < nodes.length; i += 1) {
+          if (nodes[i].classList.contains("active")) {
+            return nodes[i].getAttribute(attr);
+          }
+        }
+        return fallback;
+      }
+      // Highlight (or un-highlight) a project across both pie variants. The
+      // full project path is stored on each slice as data-key so we don't
+      // have to deal with shortened display names.
+      function highlightPie(projectKey) {
+        document.querySelectorAll(".pie-panel .slice").forEach(function (s) {
+          const match = projectKey && s.getAttribute("data-key") === projectKey;
+          s.classList.toggle("highlighted", !!match);
+        });
+      }
       function update() {
         const r = rangeSel.value;
         const m = modelSel.value;
+        const pj = projectSel.value;
+        const c = activeValue(chartBtns, "data-chart", "bars");
+        const metric = activeValue(metricBtns, "data-metric", "tokens");
         panels.forEach(function (p) {
           const match =
             p.getAttribute("data-range") === r &&
-            p.getAttribute("data-model") === m;
+            p.getAttribute("data-model") === m &&
+            p.getAttribute("data-project") === pj &&
+            p.getAttribute("data-chart") === c &&
+            p.getAttribute("data-metric") === metric;
           p.classList.toggle("hidden", !match);
         });
+        // Pie highlight follows the project filter: reflect the current
+        // project selection on the pies so the two views stay in sync.
+        highlightPie(pj !== ALL ? pj : null);
       }
       rangeSel.addEventListener("change", update);
-      modelSel.addEventListener("change", update);
+      // Model + project are mutually exclusive; changing one resets the
+      // other so we stay inside the pre-rendered panel set.
+      modelSel.addEventListener("change", function () {
+        if (modelSel.value !== ALL) projectSel.value = ALL;
+        update();
+      });
+      projectSel.addEventListener("change", function () {
+        if (projectSel.value !== ALL) modelSel.value = ALL;
+        update();
+      });
+      function wireToggle(btns) {
+        btns.forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            btns.forEach(function (b) { b.classList.remove("active"); });
+            btn.classList.add("active");
+            update();
+          });
+        });
+      }
+      wireToggle(chartBtns);
+      wireToggle(metricBtns);
 
-      // Clicking a row in the "By model" table sets the model dropdown and
-      // scrolls the chart into view so the user sees the effect immediately.
+      // Clicking a row in a clickable table sets the matching dropdown, resets
+      // the other filter to "all", and scrolls the chart into view. Project
+      // rows also highlight the matching slice in the pie chart.
       document.querySelectorAll("tr.clickable").forEach(function (row) {
         row.addEventListener("click", function () {
           const model = row.getAttribute("data-select-model");
-          if (!model) return;
-          modelSel.value = model;
+          const project = row.getAttribute("data-select-project");
+          if (model) {
+            modelSel.value = model;
+            projectSel.value = ALL;
+          } else if (project) {
+            projectSel.value = project;
+            modelSel.value = ALL;
+          } else {
+            return;
+          }
           update();
           const heading = document.getElementById("tokens-per-day");
           if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -449,21 +758,75 @@ function renderHtml(
       panels.forEach(function (panel) {
         panel.addEventListener("mousemove", function (ev) {
           const target = ev.target;
-          if (!(target instanceof SVGRectElement) || !target.classList.contains("bar")) {
+          // Bars (rects) and line-chart points (circles) both use class="bar"
+          // as the hover marker. Anything else: hide the tooltip.
+          if (
+            !(target instanceof Element) ||
+            !target.classList.contains("bar")
+          ) {
             tooltip.classList.remove("visible");
             return;
           }
           const date = target.getAttribute("data-date");
-          const tokens = target.getAttribute("data-tokens");
+          const value = target.getAttribute("data-value");
           tooltip.innerHTML =
             '<div class="date">' + date + '</div>' +
-            '<div class="tokens">' + tokens + ' tokens</div>';
+            '<div class="tokens">' + value + '</div>';
           // Offset the tooltip so it sits above/right of the cursor and
           // doesn't cover the bar itself.
           const x = ev.clientX + 12;
           const y = ev.clientY - 12;
           tooltip.style.left = x + "px";
           tooltip.style.top = y + "px";
+          tooltip.classList.add("visible");
+        });
+        panel.addEventListener("mouseleave", function () {
+          tooltip.classList.remove("visible");
+        });
+      });
+    })();
+
+    // Project pie: Tokens/Messages toggle. Flips the .hidden class between
+    // the two pre-rendered <div class="pie-panel"> variants.
+    (function () {
+      const toggle = document.getElementById("pie-metric-toggle");
+      if (!toggle) return;
+      const btns = toggle.querySelectorAll(".toggle-btn");
+      const panels = document.querySelectorAll(".pie-panel");
+      btns.forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          btns.forEach(function (b) { b.classList.remove("active"); });
+          btn.classList.add("active");
+          const m = btn.getAttribute("data-metric");
+          panels.forEach(function (p) {
+            p.classList.toggle("hidden", p.getAttribute("data-metric") !== m);
+          });
+        });
+      });
+    })();
+
+    // Pie-slice hover tooltip. Reuses the same #chart-tooltip div as the
+    // bar/line chart above, just with a "project · pct" payload.
+    (function () {
+      const tooltip = document.getElementById("chart-tooltip");
+      const pies = document.querySelectorAll(".pie-panel");
+      pies.forEach(function (panel) {
+        panel.addEventListener("mousemove", function (ev) {
+          const target = ev.target;
+          if (
+            !(target instanceof Element) ||
+            !target.classList.contains("slice")
+          ) {
+            tooltip.classList.remove("visible");
+            return;
+          }
+          const label = target.getAttribute("data-label");
+          const value = target.getAttribute("data-value");
+          tooltip.innerHTML =
+            '<div class="date">' + label + '</div>' +
+            '<div class="tokens">' + value + '</div>';
+          tooltip.style.left = (ev.clientX + 12) + "px";
+          tooltip.style.top = (ev.clientY - 12) + "px";
           tooltip.classList.add("visible");
         });
         panel.addEventListener("mouseleave", function () {
@@ -493,8 +856,9 @@ function renderGroupTable(
   keyHeader: string,
   s: Summary,
   // When provided, each row becomes clickable: clicking it sets the value of
-  // the <select> with matching id (e.g. "model") and re-renders the chart.
-  selectOnClick?: "model",
+  // the <select> with matching id ("model" or "project") and re-renders the
+  // chart. Project clicks additionally highlight the matching pie slice.
+  selectOnClick?: "model" | "project",
   // When true, the key column displays only the last path segment prefixed
   // with ".../", and the full path shows up in a tooltip. Handy for the
   // project table where "/home/mann/..." eats horizontal space.
@@ -547,20 +911,20 @@ function renderGroupTable(
 }
 
 /**
- * Render an inline-SVG bar chart of tokens per bucket. `bucketDays` controls
+ * Render an inline-SVG bar chart of per-bucket values. `bucketDays` controls
  * how many consecutive days each bar covers — 1 for daily, 7 for weekly, etc.
  * We walk the full window (not just days with data) so the chart doesn't lie
- * about "quiet days" by skipping them.
+ * about "quiet days" by skipping them. `unit` is appended to the per-bar
+ * tooltip label (e.g. "tokens", "msgs").
  */
 function renderBarChart(
-  summary: Summary,
+  byDay: Map<string, number>,
   startMs: number,
   endMs: number,
   bucketDays: number = 1,
+  unit: string = "tokens",
 ): string {
   const DAY_MS = 24 * 60 * 60 * 1000;
-  // Build a map from "YYYY-MM-DD" → total_tokens for O(1) lookup.
-  const byDay = new Map(summary.groups.map((g) => [g.key, g.totals.total_tokens]));
 
   // Each `day` here is actually a bucket — one bar on the chart. When
   // bucketDays === 1 it's literally one day; when it's 7 it's a week's sum.
@@ -598,13 +962,13 @@ function renderBarChart(
   const innerW = Math.max(0.5, barW - gap);
 
   // Each bar carries data-* attributes so the JS tooltip can read the date
-  // and token count without re-parsing the SVG.
+  // and pre-formatted value (e.g. "1,234 tokens") without re-parsing the SVG.
   const bars = days
     .map((d, i) => {
       const h = (d.value / max) * chartH;
       const x = padding.left + i * barW;
       const y = padding.top + (chartH - h);
-      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}" data-date="${escape(d.label)}" data-tokens="${formatNumber(d.value)}"></rect>`;
+      return `<rect class="bar" x="${x + gap / 2}" y="${y}" width="${innerW}" height="${h}" data-date="${escape(d.label)}" data-value="${formatNumber(d.value)} ${escape(unit)}"></rect>`;
     })
     .join("");
 
@@ -668,6 +1032,220 @@ function renderBarChart(
     ${labels}
     ${yLabel}
   </svg>`;
+}
+
+/**
+ * Line-chart variant of `renderBarChart`. Same axes / grid / labels, but
+ * instead of rectangles we draw a polyline connecting each bucket's value,
+ * a faint area fill underneath, and a circle at every point so the existing
+ * hover-tooltip code has a hit target per bucket.
+ */
+function renderLineChart(
+  byDay: Map<string, number>,
+  startMs: number,
+  endMs: number,
+  bucketDays: number = 1,
+  unit: string = "tokens",
+): string {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  const days: { key: string; label: string; value: number }[] = [];
+  for (let bstart = startMs; bstart <= endMs; bstart += bucketDays * DAY_MS) {
+    const bend = Math.min(bstart + (bucketDays - 1) * DAY_MS, endMs);
+    let total = 0;
+    for (let d = bstart; d <= bend; d += DAY_MS) {
+      const key = new Date(d).toISOString().slice(0, 10);
+      total += byDay.get(key) ?? 0;
+    }
+    const startKey = new Date(bstart).toISOString().slice(0, 10);
+    const endKey = new Date(bend).toISOString().slice(0, 10);
+    const label = bucketDays === 1 ? startKey : `${startKey} to ${endKey}`;
+    days.push({ key: startKey, label, value: total });
+  }
+
+  const width = 900;
+  const height = 180;
+  const padding = { top: 10, right: 10, bottom: 30, left: 60 };
+  const chartW = width - padding.left - padding.right;
+  const chartH = height - padding.top - padding.bottom;
+  const rawMax = Math.max(1, ...days.map((d) => d.value));
+  const max = niceCeil(rawMax);
+
+  // Evenly space points across the chart width. With N buckets we place them
+  // at column centers (i + 0.5) so the line visually aligns with where the
+  // matching bar would sit in the bar-chart view.
+  const colW = days.length > 0 ? chartW / days.length : chartW;
+  const points = days.map((d, i) => {
+    const x = padding.left + (i + 0.5) * colW;
+    const y = padding.top + chartH * (1 - d.value / max);
+    return { x, y, d };
+  });
+
+  const linePath = points.map((p) => `${p.x},${p.y}`).join(" ");
+  // Area polygon: same path but closed along the x-axis so fill sits under
+  // the line. Only draw when we have at least one point.
+  const areaPath =
+    points.length > 0
+      ? `${points[0]!.x},${padding.top + chartH} ${linePath} ${points[points.length - 1]!.x},${padding.top + chartH}`
+      : "";
+
+  // Circle radius scales down when there are lots of points so 365 weekly
+  // buckets don't overlap into a blob. Clamped so small views still have a
+  // visible dot.
+  const dotR = Math.max(1.5, Math.min(3.5, colW * 0.3));
+  const dots = points
+    .map(
+      (p) =>
+        `<circle class="bar" cx="${p.x}" cy="${p.y}" r="${dotR}" data-date="${escape(p.d.label)}" data-value="${formatNumber(p.d.value)} ${escape(unit)}"></circle>`,
+    )
+    .join("");
+
+  // X-axis labels mirror renderBarChart exactly so swapping chart types
+  // doesn't shift the x-axis reading of the data.
+  const weekdayOf = (key: string) =>
+    new Date(key + "T00:00:00Z").toLocaleDateString("en-US", {
+      weekday: "short",
+      timeZone: "UTC",
+    });
+  const xLabel = (i: number, text: string) => {
+    if (!days[i]) return "";
+    const x = padding.left + (i + 0.5) * colW;
+    return `<text x="${x}" y="${height - 10}" text-anchor="middle">${escape(text)}</text>`;
+  };
+  let labels = "";
+  if (bucketDays === 1 && days.length <= 31) {
+    labels = days.map((d, i) => xLabel(i, weekdayOf(d.key))).join("");
+  } else {
+    const stride = Math.max(1, Math.ceil(60 / colW));
+    const indices = new Set<number>();
+    for (let i = 0; i < days.length; i += stride) indices.add(i);
+    indices.add(days.length - 1);
+    labels = Array.from(indices)
+      .map((i) => xLabel(i, days[i]!.key.slice(5)))
+      .join("");
+  }
+
+  // Y-axis ticks + gridlines — identical to the bar chart so the two views
+  // are visually interchangeable.
+  const tickCount = 4;
+  const yTicks: string[] = [];
+  const gridLines: string[] = [];
+  for (let i = 0; i <= tickCount; i += 1) {
+    const frac = i / tickCount;
+    const value = max * frac;
+    const y = padding.top + chartH * (1 - frac);
+    yTicks.push(
+      `<text x="${padding.left - 8}" y="${y + 3}" text-anchor="end">${escape(formatCompact(value))}</text>`,
+    );
+    if (i > 0) {
+      gridLines.push(
+        `<line class="grid" x1="${padding.left}" y1="${y}" x2="${padding.left + chartW}" y2="${y}" />`,
+      );
+    }
+  }
+
+  const area = areaPath ? `<polygon class="area" points="${areaPath}" />` : "";
+  const line = linePath ? `<polyline class="line" points="${linePath}" />` : "";
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}">
+    ${gridLines.join("")}
+    <line class="axis" x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${padding.top + chartH}" />
+    <line class="axis" x1="${padding.left}" y1="${padding.top + chartH}" x2="${padding.left + chartW}" y2="${padding.top + chartH}" />
+    ${area}
+    ${line}
+    ${dots}
+    ${labels}
+    ${yTicks.join("")}
+  </svg>`;
+}
+
+/**
+ * Color palette used for pie-chart slices (and anywhere else we need N
+ * distinct categorical colors). Prefer VSCode's chart theme vars so the
+ * pie tones match the rest of the editor, with concrete fallbacks for
+ * themes that don't define them.
+ */
+const PIE_COLORS = [
+  "var(--vscode-charts-blue, #4a9eff)",
+  "var(--vscode-charts-orange, #e8a33d)",
+  "var(--vscode-charts-green, #89d185)",
+  "var(--vscode-charts-purple, #c586c0)",
+  "var(--vscode-charts-red, #f48771)",
+  "var(--vscode-charts-yellow, #dcdcaa)",
+  "#6db3f2",
+  "#f29f7c",
+  "#b4a7d6",
+];
+
+/**
+ * Render a pie chart for projects with a color-matched legend. Each wedge
+ * carries data-* attributes so the existing #chart-tooltip can show the
+ * project path, raw value, and percentage on hover. `unit` is the metric
+ * label ("tokens" or "msgs") appended to the tooltip and legend numbers.
+ *
+ * Edge cases: when only one item is non-zero we draw a full circle instead
+ * of a path, because an SVG arc of exactly 360° collapses to a zero-length
+ * segment. Zero-total data short-circuits to an empty-state message.
+ */
+function renderProjectPie(
+  items: [string, number][],
+  unit: string,
+): string {
+  const total = items.reduce((s, [, v]) => s + v, 0);
+  if (total === 0 || items.length === 0) {
+    return `<p class="empty">No data.</p>`;
+  }
+  const cx = 110;
+  const cy = 110;
+  const r = 100;
+  const wedges: string[] = [];
+  const legendItems: string[] = [];
+  // Start at 12 o'clock and go clockwise (matches what most users expect
+  // when reading a pie chart).
+  let angle = -Math.PI / 2;
+  for (let i = 0; i < items.length; i += 1) {
+    const [key, value] = items[i]!;
+    const color = PIE_COLORS[i % PIE_COLORS.length]!;
+    const displayKey = key === "Other" ? "Other" : shortenPath(key);
+    const pct = (value / total) * 100;
+    const pctLabel = pct < 0.1 ? "<0.1%" : pct.toFixed(1) + "%";
+    const valueLabel = `${formatNumber(value)} ${unit}`;
+    // Tooltip shows the short display name (last path segment) — the full
+    // path is still visible on the legend row's title attribute for anyone
+    // who needs it. `data-key` carries the full path (or "Other") so outside
+    // code can match slices by project without depending on display text.
+    const labelAttr = escape(displayKey);
+    const valueAttr = escape(`${valueLabel} · ${pctLabel}`);
+    const keyAttr = escape(key);
+
+    if (items.length === 1) {
+      wedges.push(
+        `<circle class="slice" cx="${cx}" cy="${cy}" r="${r}" fill="${color}" data-key="${keyAttr}" data-label="${labelAttr}" data-value="${valueAttr}"></circle>`,
+      );
+    } else {
+      const frac = value / total;
+      const a = frac * Math.PI * 2;
+      const x1 = cx + r * Math.cos(angle);
+      const y1 = cy + r * Math.sin(angle);
+      angle += a;
+      const x2 = cx + r * Math.cos(angle);
+      const y2 = cy + r * Math.sin(angle);
+      const largeArc = a > Math.PI ? 1 : 0;
+      const d = `M${cx},${cy} L${x1.toFixed(3)},${y1.toFixed(3)} A${r},${r} 0 ${largeArc} 1 ${x2.toFixed(3)},${y2.toFixed(3)} Z`;
+      wedges.push(
+        `<path class="slice" d="${d}" fill="${color}" data-key="${keyAttr}" data-label="${labelAttr}" data-value="${valueAttr}"></path>`,
+      );
+    }
+
+    legendItems.push(
+      `<li><span class="swatch" style="background: ${color};"></span><span class="name" title="${escape(key)}">${escape(displayKey)}</span><span class="val">${formatNumber(value)} ${escape(unit)} · ${pctLabel}</span></li>`,
+    );
+  }
+
+  return `<div class="pie-chart">
+    <svg viewBox="0 0 220 220" width="220" height="220">${wedges.join("")}</svg>
+    <ul class="pie-legend">${legendItems.join("")}</ul>
+  </div>`;
 }
 
 /**

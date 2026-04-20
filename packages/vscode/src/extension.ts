@@ -55,7 +55,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // ------------------------------------------------------------------------
   // 3. Sidebar webview view (activity-bar icon).
   // ------------------------------------------------------------------------
-  const sidebar = new SidebarViewProvider();
+  const sidebar = new SidebarViewProvider(context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SidebarViewProvider.viewType,

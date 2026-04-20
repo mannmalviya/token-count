@@ -57,6 +57,57 @@ export const UsageRecordSchema = z.object({
 export type UsageRecord = z.infer<typeof UsageRecordSchema>;
 
 // ---------------------------------------------------------------------------
+// PromptRecord — one line of `~/.token-count/prompts.jsonl`.
+//
+// One record per REAL user prompt (i.e. something the human actually typed).
+// Claude Code transcripts contain two kinds of `type: "user"` events:
+//   1. Genuine user input — has a `text` content block.
+//   2. Synthetic tool_result messages the agent loop injects after a tool
+//      call — has a `tool_result` content block. These share the same
+//      `promptId` as the user prompt that kicked off the turn.
+//
+// By deduping on `promptId` we get exactly one record per user prompt — the
+// number Claude Code's `/insights` calls "messages".
+// ---------------------------------------------------------------------------
+export const PromptRecordSchema = z.object({
+  // ISO-8601 UTC timestamp of the user prompt.
+  ts: z.string().datetime(),
+  source: SourceSchema,
+  session_id: z.string().min(1),
+  // The transcript's `promptId`. Our dedupe key — a single user prompt has
+  // one of these regardless of how many tool calls it spawns downstream.
+  prompt_id: z.string().min(1),
+  cwd: z.string(),
+});
+export type PromptRecord = z.infer<typeof PromptRecordSchema>;
+
+// ---------------------------------------------------------------------------
+// Shape of a user event in Claude Code's transcript JSONL.
+//
+// We only model the fields we read. `message.content` is an array that can
+// mix text blocks and tool_result blocks; we inspect it to tell real prompts
+// from synthetic ones.
+// ---------------------------------------------------------------------------
+export const TranscriptUserEventSchema = z.object({
+  type: z.literal("user"),
+  uuid: z.string(),
+  sessionId: z.string(),
+  timestamp: z.string(),
+  cwd: z.string().optional(),
+  promptId: z.string().optional(),
+  message: z.object({
+    role: z.literal("user"),
+    // Content can be a string (old shape) or an array of blocks (current).
+    // zod's union handles either.
+    content: z.union([
+      z.string(),
+      z.array(z.object({ type: z.string() }).passthrough()),
+    ]),
+  }),
+});
+export type TranscriptUserEvent = z.infer<typeof TranscriptUserEventSchema>;
+
+// ---------------------------------------------------------------------------
 // Shape of an assistant event in Claude Code's transcript JSONL.
 //
 // We only model the fields we actually read. Claude may add new fields —

@@ -60,7 +60,7 @@ async function main() {
         const projectsDir = path.join(os.homedir(), ".claude", "projects");
         const bf = backfillFromClaudeProjects({ projectsDir });
         console.log(
-          `Backfill: scanned ${bf.sessionsScanned} sessions, added ${bf.appended} records (${bf.skipped} already recorded).`,
+          `Backfill: scanned ${bf.sessionsScanned} sessions, added ${bf.appended} records (${bf.skipped} already recorded), ${bf.promptsAppended} new prompts (${bf.promptsSkipped} already recorded).`,
         );
       }
     });
@@ -134,7 +134,7 @@ async function main() {
       const projectsDir = path.join(os.homedir(), ".claude", "projects");
       const bf = backfillFromClaudeProjects({ projectsDir });
       console.log(
-        `Scanned ${bf.sessionsScanned} sessions, added ${bf.appended} records (${bf.skipped} already recorded).`,
+        `Scanned ${bf.sessionsScanned} sessions, added ${bf.appended} records (${bf.skipped} already recorded), ${bf.promptsAppended} new prompts (${bf.promptsSkipped} already recorded).`,
       );
     });
 

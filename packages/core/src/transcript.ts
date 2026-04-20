@@ -19,6 +19,8 @@
 import fs from "node:fs";
 import {
   TranscriptAssistantEventSchema,
+  TranscriptUserEventSchema,
+  type PromptRecord,
   type UsageRecord,
 } from "./types.js";
 
@@ -102,4 +104,70 @@ export function parseAssistantTurns(
   const cutoff = parsed.findIndex((r) => r.turn_uuid === sinceUuid);
   if (cutoff === -1) return parsed;
   return parsed.slice(cutoff + 1);
+}
+
+// ---------------------------------------------------------------------------
+// parseUserPrompts
+//
+// Walks the same transcript file but yields one PromptRecord per REAL user
+// prompt. "Real" means the event's content carries at least one `text` block
+// (or is a plain string in older transcripts) — we drop synthetic tool_result
+// events, which are the agent loop's way of feeding tool output back to the
+// model. We also dedupe by `promptId` because a single prompt sometimes
+// produces multiple transcript events.
+//
+// Same graceful-failure contract as parseAssistantTurns: missing file → [];
+// malformed lines are skipped silently.
+// ---------------------------------------------------------------------------
+
+export function parseUserPrompts(transcriptPath: string): PromptRecord[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(transcriptPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+
+  const out: PromptRecord[] = [];
+  // Track promptIds we've already emitted for this file so dedup is O(1).
+  const seenPromptIds = new Set<string>();
+
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+
+    let obj: unknown;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const result = TranscriptUserEventSchema.safeParse(obj);
+    if (!result.success) continue;
+    const ev = result.data;
+
+    // Drop events with no promptId — we can't dedupe them.
+    if (!ev.promptId) continue;
+    if (seenPromptIds.has(ev.promptId)) continue;
+
+    // Must contain at least one `text` block to count as a real prompt.
+    // A string-form content (old transcripts) is always a real prompt.
+    const isRealPrompt =
+      typeof ev.message.content === "string"
+        ? true
+        : ev.message.content.some((b) => b.type === "text");
+    if (!isRealPrompt) continue;
+
+    seenPromptIds.add(ev.promptId);
+    out.push({
+      ts: ev.timestamp,
+      source: "claude-code",
+      session_id: ev.sessionId,
+      prompt_id: ev.promptId,
+      cwd: ev.cwd ?? "",
+    });
+  }
+
+  return out;
 }

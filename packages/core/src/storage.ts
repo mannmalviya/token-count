@@ -11,12 +11,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  PromptRecordSchema,
   StateCursorSchema,
   UsageRecordSchema,
+  type PromptRecord,
   type StateCursor,
   type UsageRecord,
 } from "./types.js";
-import { stateJsonPath, tokenCountDir, usageJsonlPath } from "./paths.js";
+import {
+  promptsJsonlPath,
+  stateJsonPath,
+  tokenCountDir,
+  usageJsonlPath,
+} from "./paths.js";
 
 // ---------------------------------------------------------------------------
 // usage.jsonl
@@ -70,6 +77,44 @@ export function readAllRecords(): UsageRecord[] {
     const result = UsageRecordSchema.safeParse(obj);
     if (result.success) records.push(result.data);
     // silently drop records that don't match the current schema
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// prompts.jsonl
+//
+// Same append-only contract as usage.jsonl, but one record per REAL user
+// prompt (not per assistant turn). Dedupe key is `prompt_id`.
+// ---------------------------------------------------------------------------
+
+export function appendPrompts(records: PromptRecord[]): void {
+  if (records.length === 0) return;
+  fs.mkdirSync(tokenCountDir(), { recursive: true });
+  const chunk = records.map((r) => JSON.stringify(r)).join("\n") + "\n";
+  fs.appendFileSync(promptsJsonlPath(), chunk, "utf8");
+}
+
+export function readAllPrompts(): PromptRecord[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(promptsJsonlPath(), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+
+  const records: PromptRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+    let obj: unknown;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const result = PromptRecordSchema.safeParse(obj);
+    if (result.success) records.push(result.data);
   }
   return records;
 }

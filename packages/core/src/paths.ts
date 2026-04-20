@@ -30,3 +30,14 @@ export function usageJsonlPath(): string {
 export function stateJsonPath(): string {
   return path.join(tokenCountDir(), "state.json");
 }
+
+/**
+ * Append-only log of one PromptRecord per real user prompt.
+ *
+ * Kept separate from usage.jsonl because the schemas and dedupe keys differ
+ * (prompts dedupe by prompt_id; usage dedupes by turn_uuid). Two thin files
+ * are easier to reason about than one file with a `kind` discriminator.
+ */
+export function promptsJsonlPath(): string {
+  return path.join(tokenCountDir(), "prompts.jsonl");
+}

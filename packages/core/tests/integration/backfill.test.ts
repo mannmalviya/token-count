@@ -93,7 +93,13 @@ describe("backfillFromClaudeProjects", () => {
     const result = backfillFromClaudeProjects({
       projectsDir: path.join(projectsDir, "nope"),
     });
-    expect(result).toEqual({ sessionsScanned: 0, appended: 0, skipped: 0 });
+    expect(result).toEqual({
+      sessionsScanned: 0,
+      appended: 0,
+      skipped: 0,
+      promptsAppended: 0,
+      promptsSkipped: 0,
+    });
     expect(readAllRecords()).toEqual([]);
   });
 

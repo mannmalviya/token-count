@@ -12,8 +12,11 @@
 // entrypoint wraps this in a try/catch so exit code is always 0.
 
 import {
+  appendPrompts,
   appendRecords,
   parseAssistantTurns,
+  parseUserPrompts,
+  readAllPrompts,
   readStateCursor,
   writeStateCursor,
 } from "@token-count/core";
@@ -44,6 +47,22 @@ export function runHook(payload: HookPayload): HookResult {
   const sinceUuid = cursor[payload.session_id];
 
   const newRecords = parseAssistantTurns(payload.transcript_path, sinceUuid);
+
+  // Also scan for real user prompts. These aren't cursor-tracked — the
+  // parser dedupes by promptId within the file, and we dedupe across files
+  // against what's already in prompts.jsonl. Prompt count per transcript is
+  // small, so re-scanning is cheap.
+  const transcriptPrompts = parseUserPrompts(payload.transcript_path);
+  const existingPromptIds = new Set(readAllPrompts().map((p) => p.prompt_id));
+  const newPrompts = transcriptPrompts.filter(
+    (p) => !existingPromptIds.has(p.prompt_id),
+  );
+
+  // Write both files. Order doesn't matter — each is independent and
+  // append-atomic.
+  if (newPrompts.length > 0) {
+    appendPrompts(newPrompts);
+  }
 
   if (newRecords.length === 0) {
     return { appended: 0 };

@@ -11,6 +11,7 @@
 
 import * as vscode from "vscode";
 import {
+  readAllPrompts,
   readAllRecords,
   summarize,
   type Summary,
@@ -63,7 +64,8 @@ export class DashboardPanel {
     if (!DashboardPanel.current) return;
     try {
       const records = readAllRecords();
-      this.panel.webview.html = renderHtml(records);
+      const prompts = readAllPrompts();
+      this.panel.webview.html = renderHtml(records, prompts);
     } catch (err) {
       this.panel.webview.html = renderError(err);
     }
@@ -89,7 +91,10 @@ export class DashboardPanel {
 // (model names, project paths) before interpolating.
 // ---------------------------------------------------------------------------
 
-function renderHtml(records: Parameters<typeof summarize>[0]): string {
+function renderHtml(
+  records: Parameters<typeof summarize>[0],
+  prompts: ReturnType<typeof readAllPrompts>,
+): string {
   const DAY_MS = 24 * 60 * 60 * 1000;
 
   const now = new Date();
@@ -114,10 +119,13 @@ function renderHtml(records: Parameters<typeof summarize>[0]): string {
   const byProject = summarize(records, { groupBy: "project" });
 
   // --- Headline counts. ---------------------------------------------------
-  // Each record = one assistant turn, so record_count is "messages". The
-  // other numbers are unique-value counts over the full record set — we use
-  // a Set to dedupe in O(n).
-  const messages = allTime.totals.record_count;
+  // "API calls" = one per assistant response in the transcript. Each tool-use
+  // round trip is its own response, so this number is much bigger than the
+  // number of times you actually typed something.
+  // "User messages" = one per unique prompt_id across prompts.jsonl. This
+  // matches the "messages" number Claude Code's /insights reports.
+  const apiCalls = allTime.totals.record_count;
+  const userMessages = prompts.length;
   const sessions = new Set(records.map((r) => r.session_id)).size;
   const projects = new Set(records.map((r) => r.cwd)).size;
   const models = new Set(records.map((r) => r.model)).size;
@@ -247,7 +255,8 @@ function renderHtml(records: Parameters<typeof summarize>[0]): string {
   </div>
 
   <div class="stats">
-    ${statItem("Messages", formatNumber(messages))}
+    ${statItem("User messages", formatNumber(userMessages), "How many times did I talk to Claude?")}
+    ${statItem("API calls", formatNumber(apiCalls), "How many assistant responses were generated (one per API call, including tool-use rounds)")}
     ${statItem("Sessions", formatNumber(sessions))}
     ${statItem("Projects", formatNumber(projects))}
     ${statItem("Models", formatNumber(models))}
@@ -291,9 +300,13 @@ function totalCard(label: string, t: TotalsBlock): string {
   return `<div class="card"><div class="label">${escape(label)}</div><div class="value">${formatNumber(t.total_tokens)}</div><div class="label">${t.record_count} turns</div></div>`;
 }
 
-// One label/value pair in the compact stats row (messages, sessions, etc).
-function statItem(label: string, value: string): string {
-  return `<div class="stat"><div class="label">${escape(label)}</div><div class="value">${escape(value)}</div></div>`;
+// One label/value pair in the compact stats row. `tooltip` is optional — when
+// provided, it's surfaced via the native `title` attribute so hovering shows
+// the explanation. No JS needed; browsers render this as a tooltip.
+function statItem(label: string, value: string, tooltip?: string): string {
+  const titleAttr = tooltip ? ` title="${escape(tooltip)}"` : "";
+  const cursor = tooltip ? ' style="cursor: help;"' : "";
+  return `<div class="stat"${titleAttr}${cursor}><div class="label">${escape(label)}</div><div class="value">${escape(value)}</div></div>`;
 }
 
 function renderGroupTable(keyHeader: string, s: Summary): string {

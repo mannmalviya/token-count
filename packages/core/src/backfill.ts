@@ -19,14 +19,16 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { parseAssistantTurns } from "./transcript.js";
+import { parseAssistantTurns, parseUserPrompts } from "./transcript.js";
 import {
+  appendPrompts,
   appendRecords,
+  readAllPrompts,
   readAllRecords,
   readStateCursor,
   writeStateCursor,
 } from "./storage.js";
-import type { UsageRecord } from "./types.js";
+import type { PromptRecord, UsageRecord } from "./types.js";
 
 export interface BackfillOptions {
   /**
@@ -43,6 +45,10 @@ export interface BackfillResult {
   appended: number;
   /** Records seen in transcripts but skipped because turn_uuid was a duplicate. */
   skipped: number;
+  /** Number of prompt records appended to prompts.jsonl. */
+  promptsAppended: number;
+  /** Prompts seen in transcripts but skipped because prompt_id was a duplicate. */
+  promptsSkipped: number;
 }
 
 /**
@@ -54,19 +60,30 @@ export function backfillFromClaudeProjects(
 ): BackfillResult {
   // Missing projects dir → fresh Claude install, nothing to do.
   if (!fs.existsSync(opts.projectsDir)) {
-    return { sessionsScanned: 0, appended: 0, skipped: 0 };
+    return {
+      sessionsScanned: 0,
+      appended: 0,
+      skipped: 0,
+      promptsAppended: 0,
+      promptsSkipped: 0,
+    };
   }
 
-  // Build a Set of turn_uuids we already have. O(records) memory but cheap
-  // — even thousands of records is <1MB of strings.
+  // Build Sets of keys we already have, so dedupe is O(1) per record.
+  // O(records) memory, but even thousands of records is well under 1MB.
   const existingUuids = new Set<string>(
     readAllRecords().map((r) => r.turn_uuid),
+  );
+  const existingPromptIds = new Set<string>(
+    readAllPrompts().map((p) => p.prompt_id),
   );
 
   const cursor = readStateCursor();
   const toAppend: UsageRecord[] = [];
+  const promptsToAppend: PromptRecord[] = [];
   let sessionsScanned = 0;
   let skipped = 0;
+  let promptsSkipped = 0;
 
   // Each subdirectory of projectsDir is one project slug. Inside are
   // per-session .jsonl transcripts.
@@ -82,6 +99,20 @@ export function backfillFromClaudeProjects(
       // parseAssistantTurns returns every record in the file (no cursor
       // passed). We dedupe against existingUuids below.
       const records = parseAssistantTurns(transcriptPath);
+
+      // Also scan for real user prompts. Separate pass over the same file —
+      // cheap given transcripts are small and the parser short-circuits on
+      // non-matching lines.
+      const prompts = parseUserPrompts(transcriptPath);
+      for (const p of prompts) {
+        if (existingPromptIds.has(p.prompt_id)) {
+          promptsSkipped += 1;
+          continue;
+        }
+        existingPromptIds.add(p.prompt_id);
+        promptsToAppend.push(p);
+      }
+
       if (records.length === 0) continue;
 
       for (const r of records) {
@@ -101,9 +132,12 @@ export function backfillFromClaudeProjects(
     }
   }
 
-  // Single append so we don't thrash the file on large backfills.
+  // Single append per file so we don't thrash the disk on large backfills.
   if (toAppend.length > 0) {
     appendRecords(toAppend);
+  }
+  if (promptsToAppend.length > 0) {
+    appendPrompts(promptsToAppend);
   }
   writeStateCursor(cursor);
 
@@ -111,6 +145,8 @@ export function backfillFromClaudeProjects(
     sessionsScanned,
     appended: toAppend.length,
     skipped,
+    promptsAppended: promptsToAppend.length,
+    promptsSkipped,
   };
 }
 

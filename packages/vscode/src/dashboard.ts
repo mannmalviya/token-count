@@ -409,15 +409,13 @@ function renderHtml(
     { id: "all", label: "All time", startMs: earliestDayUTC, bucketDays: 1 },
   ];
 
-  // Default selection: month (matches the previous "Last 30 days" view).
-  const defaultId = "month";
+  // Default selection: past year. The heatmap is the default chart and
+  // it's most informative at the year-at-a-glance scale; matching the
+  // dropdown to that gives the best first impression on open.
+  const defaultId = "year";
 
-  const options = ranges
-    .map(
-      (r) =>
-        `<option value="${r.id}"${r.id === defaultId ? " selected" : ""}>${escape(r.label)}</option>`,
-    )
-    .join("");
+  const rangeOptions: { value: string; label: string }[] = ranges
+    .map((r) => ({ value: r.id, label: r.label }));
 
   // --- Model selector. ----------------------------------------------------
   // Sentinel value "__all__" means "don't filter by model". We use a reserved
@@ -425,12 +423,10 @@ function renderHtml(
   // model name like `claude-opus-4-7`.
   const ALL_MODELS = "__all__";
   const modelList = Array.from(new Set(records.map((r) => r.model))).sort();
-  const modelOptions = [
-    `<option value="${ALL_MODELS}" selected>All models</option>`,
-    ...modelList.map(
-      (m) => `<option value="${escape(m)}">${escape(m)}</option>`,
-    ),
-  ].join("");
+  const modelOptions: { value: string; label: string }[] = [
+    { value: ALL_MODELS, label: "All models" },
+    ...modelList.map((m) => ({ value: m, label: m })),
+  ];
 
   // Chart-type toggle. "bars" is the historical default; "line" draws a
   // connected line with an area fill and hover dots on each data point;
@@ -505,12 +501,17 @@ function renderHtml(
   // state) so the axes are still in the expected position.
   const ALL_PROJECTS = "__all__";
   const projectList = Array.from(new Set(records.map((r) => r.cwd))).sort();
-  const projectOptions = [
-    `<option value="${ALL_PROJECTS}" selected>All projects</option>`,
-    ...projectList.map(
-      (p) => `<option value="${escape(p)}" title="${escape(p)}">${escape(shortenPath(p))}</option>`,
-    ),
-  ].join("");
+  // Project labels show the shortened path but each option carries the
+  // full path as a `title` (rendered via the `<li>` title attribute) so
+  // hovering surfaces the absolute cwd for disambiguation.
+  const projectOptions: { value: string; label: string; title?: string }[] = [
+    { value: ALL_PROJECTS, label: "All projects" },
+    ...projectList.map((p) => ({
+      value: p,
+      label: shortenPath(p),
+      title: p,
+    })),
+  ];
 
   // Helper that builds a single chart panel. Factored out so we can emit two
   // families of panels (per-model and per-project) without duplicating the
@@ -682,11 +683,12 @@ function renderHtml(
     border-color: var(--tc-accent);
   }
   /* Show the focus outline only for keyboard focus (Tab/Enter/Space)
-     so mouse clicks don't leave a sticky blue border after the toggle.
-     :focus-visible is the standard knob for this. */
+     so mouse clicks don't leave a sticky border after the toggle.
+     :focus-visible is the standard knob for this. Orange ring keeps
+     the dashboard's accent palette consistent. */
   .totals .card.clickable:focus { outline: none; }
   .totals .card.clickable:focus-visible {
-    outline: 1px solid var(--vscode-focusBorder);
+    outline: 1px solid var(--tc-accent);
     outline-offset: -1px;
   }
   /* Metric toggle: the parent .totals carries data-metric="tokens" or
@@ -835,7 +837,16 @@ function renderHtml(
      span is the flex item; the label/select inside it stay inline. */
   .range-control { display: inline-flex; align-items: center; gap: 6px; }
   .range-control label { white-space: nowrap; }
-  .range-select select {
+  /* Custom dropdown built to replace the native <select>. We own the
+     popup, so the hover highlight uses the Claude orange instead of
+     Chromium's blue and we get consistent styling across platforms. */
+  .dropdown { position: relative; display: inline-block; min-width: 110px; }
+  .dropdown-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
     background: var(--vscode-dropdown-background);
     color: var(--vscode-dropdown-foreground);
     border: 1px solid var(--vscode-dropdown-border, var(--vscode-editorWidget-border));
@@ -844,10 +855,54 @@ function renderHtml(
     font-family: inherit;
     font-size: 12px;
     cursor: pointer;
+    text-align: left;
   }
-  .range-select select:focus {
-    outline: 1px solid var(--vscode-focusBorder);
+  .dropdown-trigger:hover { border-color: var(--tc-accent); }
+  .dropdown-trigger:focus { outline: none; }
+  .dropdown-trigger:focus-visible {
+    outline: 1px solid var(--tc-accent);
     outline-offset: -1px;
+  }
+  .dropdown-chevron { font-size: 10px; opacity: 0.7; }
+  .dropdown-menu {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    min-width: 100%;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--vscode-dropdown-listBackground, var(--vscode-dropdown-background));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-editorWidget-border));
+    border-radius: 4px;
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    z-index: 100;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  .dropdown-menu[hidden] { display: none; }
+  .dropdown-menu li {
+    padding: 5px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--vscode-foreground);
+    white-space: nowrap;
+    user-select: none;
+  }
+  /* Hover and the keyboard-active row both light up in Claude orange. */
+  .dropdown-menu li:hover,
+  .dropdown-menu li.kbd-active {
+    background: var(--tc-accent);
+    color: #ffffff;
+  }
+  /* The currently-selected row gets a soft tint when not hovered, so
+     users can see at a glance which value is chosen. */
+  .dropdown-menu li[aria-selected="true"] {
+    background: var(--tc-accent-soft);
+  }
+  .dropdown-menu li[aria-selected="true"]:hover,
+  .dropdown-menu li[aria-selected="true"].kbd-active {
+    background: var(--tc-accent);
   }
   .chart-panel.hidden { display: none; }
   /* Empty-state placeholder when the user picks an unused (model × project)
@@ -895,7 +950,10 @@ function renderHtml(
     background: var(--tc-accent);
     color: #ffffff;
   }
-  .toggle-btn:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  /* Outline only on keyboard focus, not on click. Orange to match the
+     active state and the dropdown focus ring. */
+  .toggle-btn:focus { outline: none; }
+  .toggle-btn:focus-visible { outline: 1px solid var(--tc-accent); outline-offset: -1px; }
 
   /* Project pie chart: SVG on the left, color-matched legend on the right.
      Wraps on narrow windows so the legend slides under the pie. */
@@ -1065,9 +1123,9 @@ function renderHtml(
 
   <h2 id="tokens-per-day">Tokens per day</h2>
   <div class="range-select">
-    <span class="range-control"><label for="range">Timeframe:</label><select id="range">${options}</select></span>
-    <span class="range-control"><label for="model">Model:</label><select id="model">${modelOptions}</select></span>
-    <span class="range-control"><label for="project">Project:</label><select id="project">${projectOptions}</select></span>
+    <span class="range-control"><label for="range">Timeframe:</label>${dropdown("range", "Timeframe", rangeOptions, defaultId)}</span>
+    <span class="range-control"><label for="model">Model:</label>${dropdown("model", "Model", modelOptions, ALL_MODELS)}</span>
+    <span class="range-control"><label for="project">Project:</label>${dropdown("project", "Project", projectOptions, ALL_PROJECTS)}</span>
     <span class="toggle-group" role="group" aria-label="Chart type" id="chart-toggle">${chartToggle}</span>
     <span class="toggle-group" role="group" aria-label="Metric" id="metric-toggle">${metricToggle}</span>
   </div>
@@ -1093,8 +1151,126 @@ function renderHtml(
   ${renderGroupTable("Project", byProject, "project", true, messagesByProject)}
 
   <script>
+    // Custom dropdown wiring. Each .dropdown element gets:
+    //   - A "value" getter/setter so existing code that does
+    //     rangeSel.value = ... keeps working without changes.
+    //   - Click on trigger toggles the menu open/closed.
+    //   - Click on an option selects it, fires a "change" event on the
+    //     root, and closes the menu — same semantics as native select.
+    //   - Click outside any open dropdown closes them all.
+    //   - Keyboard: Space/Enter on the trigger opens, ArrowUp/Down
+    //     navigates, Enter selects, Escape closes.
+    //
+    // Replacing the native select was needed because the popup hover
+    // highlight is partly browser/OS-controlled and CSS overrides
+    // (option:hover, accent-color, etc.) couldn't reliably beat
+    // Chromium's default blue.
+    (function () {
+      function closeAllDropdowns() {
+        document.querySelectorAll(".dropdown-menu:not([hidden])").forEach(function (m) {
+          m.setAttribute("hidden", "");
+          const t = m.parentElement.querySelector(".dropdown-trigger");
+          if (t) t.setAttribute("aria-expanded", "false");
+          m.querySelectorAll("li.kbd-active").forEach(function (li) {
+            li.classList.remove("kbd-active");
+          });
+        });
+      }
+      document.querySelectorAll(".dropdown").forEach(function (el) {
+        const trigger = el.querySelector(".dropdown-trigger");
+        const menu = el.querySelector(".dropdown-menu");
+        const labelEl = trigger.querySelector(".dropdown-label");
+        const items = menu.querySelectorAll("li[data-value]");
+
+        // Define a "value" property so the rest of the dashboard code
+        // can read + write it just like a native select. The setter
+        // does NOT dispatch a change event (matching native semantics
+        // — only user-initiated selection fires "change").
+        Object.defineProperty(el, "value", {
+          get: function () { return el.dataset.value; },
+          set: function (v) {
+            el.dataset.value = v;
+            items.forEach(function (li) {
+              const match = li.getAttribute("data-value") === v;
+              li.setAttribute("aria-selected", match ? "true" : "false");
+              if (match) labelEl.textContent = li.textContent;
+            });
+          },
+          configurable: true,
+        });
+
+        // Trigger click: toggle menu, closing any other open ones first.
+        trigger.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          const isOpen = !menu.hasAttribute("hidden");
+          closeAllDropdowns();
+          if (!isOpen) {
+            menu.removeAttribute("hidden");
+            trigger.setAttribute("aria-expanded", "true");
+          }
+        });
+
+        // Option click: select + fire change + close.
+        items.forEach(function (li) {
+          li.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            el.value = li.getAttribute("data-value");
+            el.dispatchEvent(new Event("change"));
+            closeAllDropdowns();
+          });
+          li.addEventListener("mouseenter", function () {
+            // Mouse hover clears any keyboard-active highlight so the
+            // two indicators don't fight.
+            menu.querySelectorAll("li.kbd-active").forEach(function (x) {
+              x.classList.remove("kbd-active");
+            });
+          });
+        });
+
+        // Keyboard nav on the trigger.
+        trigger.addEventListener("keydown", function (ev) {
+          const isOpen = !menu.hasAttribute("hidden");
+          if (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            if (!isOpen) {
+              closeAllDropdowns();
+              menu.removeAttribute("hidden");
+              trigger.setAttribute("aria-expanded", "true");
+            }
+            // Move keyboard cursor.
+            const list = Array.prototype.slice.call(items);
+            let active = list.findIndex(function (x) { return x.classList.contains("kbd-active"); });
+            if (active === -1) {
+              active = list.findIndex(function (x) { return x.getAttribute("aria-selected") === "true"; });
+              if (active === -1) active = 0;
+            } else if (ev.key === "ArrowDown") {
+              active = Math.min(list.length - 1, active + 1);
+            } else if (ev.key === "ArrowUp") {
+              active = Math.max(0, active - 1);
+            } else if (ev.key === "Enter" || ev.key === " ") {
+              // Confirm on Enter/Space when already open with a kbd-active row.
+              if (isOpen) {
+                list[active].click();
+                return;
+              }
+            }
+            list.forEach(function (x) { x.classList.remove("kbd-active"); });
+            list[active].classList.add("kbd-active");
+            list[active].scrollIntoView({ block: "nearest" });
+          } else if (ev.key === "Escape") {
+            closeAllDropdowns();
+          }
+        });
+      });
+
+      // Click outside: close every open dropdown.
+      document.addEventListener("click", function (ev) {
+        if (!ev.target.closest(".dropdown")) closeAllDropdowns();
+      });
+    })();
+
     // Timeframe + model + chart-type toggle. All (range × model × chart)
-    // panels are already in the DOM; the three <select>s just flip the
+    // panels are already in the DOM; the three dropdowns just flip the
     // "hidden" class on everything but the one whose three data-attributes
     // all match. No IPC to the extension, so switching is instant.
     (function () {
@@ -1201,13 +1377,16 @@ function renderHtml(
       // chart by that project. Same behavior as clicking its row in the By
       // project table. The "Other" aggregate wedge/legend row is skipped
       // because it isn't a single real project. Only keys that exist as an
-      // <option> in the project dropdown are actionable (guards against
+      // option in the project dropdown are actionable (guards against
       // stale data). Clicking the already-selected project toggles back to
       // "all" so users can easily clear the filter from the pie.
       function selectProjectFromPie(key) {
         if (!key || key === "Other") return;
-        const hasOption = Array.from(projectSel.options).some(function (o) {
-          return o.value === key;
+        // Custom dropdowns expose options as <li data-value> rather than
+        // the native <option> elements, so we lookup against those.
+        const opts = projectSel.querySelectorAll("li[data-value]");
+        const hasOption = Array.from(opts).some(function (o) {
+          return o.getAttribute("data-value") === key;
         });
         if (!hasOption) return;
         if (projectSel.value === key) {
@@ -1461,6 +1640,45 @@ function statItem(label: string, value: string, tooltip?: string): string {
   const titleAttr = tooltip ? ` title="${escape(tooltip)}"` : "";
   const cursor = tooltip ? ' style="cursor: help;"' : "";
   return `<div class="stat"${titleAttr}${cursor}><div class="label">${escape(label)}</div><div class="value">${escape(value)}</div></div>`;
+}
+
+/**
+ * Render a custom dropdown to replace a native <select>. The native one
+ * was leaking Chromium's blue hover highlight in the popup — that's
+ * partly browser/OS-controlled and not reliably overridable with CSS,
+ * so this builds the dropdown from plain elements where we own every
+ * pixel.
+ *
+ * The trigger is a real <button> so it's keyboard-focusable for free.
+ * The popup is a <ul role="listbox"> with <li role="option"> rows.
+ *
+ * The init JS (added separately, in the page-level script block)
+ * defines a `value` getter/setter on the root element so the rest of
+ * the dashboard's code (`rangeSel.value`, `modelSel.value = ALL`, etc.)
+ * keeps working unchanged. A "change" event is dispatched whenever the
+ * user clicks an option, mirroring native <select> semantics.
+ */
+function dropdown(
+  id: string,
+  ariaLabel: string,
+  items: { value: string; label: string; title?: string }[],
+  defaultValue: string,
+): string {
+  const defaultItem = items.find((i) => i.value === defaultValue) ?? items[0]!;
+  const optionsHtml = items
+    .map((i) => {
+      const titleAttr = i.title ? ` title="${escape(i.title)}"` : "";
+      const selected = i.value === defaultValue ? "true" : "false";
+      return `<li role="option" data-value="${escape(i.value)}" aria-selected="${selected}"${titleAttr}>${escape(i.label)}</li>`;
+    })
+    .join("");
+  return `<div class="dropdown" id="${id}" data-value="${escape(defaultValue)}" aria-label="${escape(ariaLabel)}">
+    <button type="button" class="dropdown-trigger" aria-haspopup="listbox" aria-expanded="false">
+      <span class="dropdown-label">${escape(defaultItem.label)}</span>
+      <span class="dropdown-chevron" aria-hidden="true">▾</span>
+    </button>
+    <ul class="dropdown-menu" role="listbox" hidden>${optionsHtml}</ul>
+  </div>`;
 }
 
 function renderGroupTable(

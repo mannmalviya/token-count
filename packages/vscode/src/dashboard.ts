@@ -303,11 +303,12 @@ function renderHtml(
   );
 
   // Project filter. Mirrors the model filter: a dropdown with an "All"
-  // sentinel plus every distinct cwd we've seen. Pre-rendering panels for
-  // every (model × project) pair would multiply our panel count by ~P, so
-  // instead we treat the two filters as mutually exclusive — picking a
-  // project resets the model to "all" and vice versa. That halves the work
-  // and avoids empty intersections that would be confusing to display.
+  // sentinel plus every distinct cwd we've seen. We pre-render every
+  // (model × project) combination — including both filters set at once
+  // — so a user can ask "Opus usage in token-count" and get the
+  // intersection rather than having one filter reset the other. Empty
+  // intersections render as a chart with no bars (not a special "empty"
+  // state) so the axes are still in the expected position.
   const ALL_PROJECTS = "__all__";
   const projectList = Array.from(new Set(records.map((r) => r.cwd))).sort();
   const projectOptions = [
@@ -322,16 +323,6 @@ function renderHtml(
   // byDay + svg logic.
   const modelKeys = [ALL_MODELS, ...modelList];
 
-  // The heatmap is always a fixed past-year window, GitHub-style. The
-  // whole point of a heatmap is "year at a glance", so the timeframe
-  // selector (week/month/year/all) doesn't apply to it — we override the
-  // data window here regardless of which range the user picked. We still
-  // emit a heatmap panel for every range value so the panel-matching JS
-  // stays uniform (range × model × project × chart × metric); all four
-  // range variants of a given heatmap render identical content.
-  const HEATMAP_DAYS = 365;
-  const heatmapStartMs = startOfTodayUTC - (HEATMAP_DAYS - 1) * DAY_MS;
-
   const buildPanel = (
     r: (typeof ranges)[number],
     m: string,
@@ -339,12 +330,11 @@ function renderHtml(
     c: (typeof chartTypes)[number],
     metric: (typeof metrics)[number],
   ): string => {
-    // Heatmap uses its fixed year window; bar/line use the selected range.
-    const sinceMs = c === "heatmap" ? heatmapStartMs : r.startMs;
-
     // Tokens: sum total_tokens per day from filtered records. Messages:
     // count prompts per day. Both respect the model filter (via primary
-    // model per session for prompts) and the project filter.
+    // model per session for prompts) and the project filter. All chart
+    // types (bars/line/heatmap) share the same data window — driven by
+    // the timeframe selector.
     let byDay: Map<string, number>;
     if (metric === "tokens") {
       let filtered = records;
@@ -352,7 +342,7 @@ function renderHtml(
       if (pk !== ALL_PROJECTS) filtered = filtered.filter((rec) => rec.cwd === pk);
       const s = summarize(filtered, {
         groupBy: "day",
-        since: new Date(sinceMs),
+        since: new Date(r.startMs),
         localTime,
       });
       byDay = new Map(s.groups.map((g) => [g.key, g.totals.total_tokens]));
@@ -360,7 +350,7 @@ function renderHtml(
       byDay = new Map();
       for (const p of prompts) {
         const ts = Date.parse(p.ts);
-        if (ts < sinceMs) continue;
+        if (ts < r.startMs) continue;
         if (m !== ALL_MODELS) {
           const primary = primaryModelBySession.get(p.session_id);
           if (primary !== m) continue;
@@ -381,39 +371,40 @@ function renderHtml(
       metric === defaultMetric
         ? ""
         : " hidden";
-    // Dispatch on chart type. Bar + line share `bucketDays` (so the year
+    // Dispatch on chart type. Bar + line use `bucketDays` (so the year
     // view rolls up into weekly bars). The heatmap is inherently a daily
     // grid — weekly buckets would defeat the point — so it ignores
-    // bucketDays and walks the range one day at a time. The heatmap also
-    // uses the fixed `heatmapStartMs` window (see above) instead of
-    // r.startMs.
+    // bucketDays and walks the range one day at a time. All three share
+    // the same r.startMs..startOfTodayUTC window so the timeframe
+    // selector drives every chart type uniformly.
     let svg: string;
     if (c === "bars") {
       svg = renderBarChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit, localTime);
     } else if (c === "line") {
       svg = renderLineChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit, localTime);
     } else {
-      svg = renderHeatmap(byDay, heatmapStartMs, startOfTodayUTC, unit, localTime);
+      svg = renderHeatmap(byDay, r.startMs, startOfTodayUTC, unit, localTime);
     }
     return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}" data-project="${escape(pk)}" data-chart="${c}" data-metric="${metric}">${svg}</div>`;
   };
 
-  // Family (1): every model at project=All. Existing behavior.
-  // Family (2): every project at model=All. New per-project panels.
-  // Together they cover every legal filter combination the UI can produce.
+  // Pre-render every (range × model × project × chart × metric)
+  // combination. Both modelKeys and projectKeys include the "all"
+  // sentinel, so this covers every legal dropdown state including the
+  // intersections (e.g. "Opus, in /home/mann/token-count").
+  // Panel count grows as ranges * (M+1) * (P+1) * charts * metrics —
+  // each panel is a small SVG so this stays cheap into the low
+  // thousands; if a future user has hundreds of projects we can revisit
+  // and emit only non-empty intersections instead.
+  const projectKeys = [ALL_PROJECTS, ...projectList];
   const panelParts: string[] = [];
   for (const r of ranges) {
     for (const m of modelKeys) {
-      for (const c of chartTypes) {
-        for (const metric of metrics) {
-          panelParts.push(buildPanel(r, m, ALL_PROJECTS, c, metric));
-        }
-      }
-    }
-    for (const pk of projectList) {
-      for (const c of chartTypes) {
-        for (const metric of metrics) {
-          panelParts.push(buildPanel(r, ALL_MODELS, pk, c, metric));
+      for (const pk of projectKeys) {
+        for (const c of chartTypes) {
+          for (const metric of metrics) {
+            panelParts.push(buildPanel(r, m, pk, c, metric));
+          }
         }
       }
     }
@@ -878,16 +869,12 @@ function renderHtml(
         highlightPie(pj !== ALL ? pj : null);
       }
       rangeSel.addEventListener("change", update);
-      // Model + project are mutually exclusive; changing one resets the
-      // other so we stay inside the pre-rendered panel set.
-      modelSel.addEventListener("change", function () {
-        if (modelSel.value !== ALL) projectSel.value = ALL;
-        update();
-      });
-      projectSel.addEventListener("change", function () {
-        if (projectSel.value !== ALL) modelSel.value = ALL;
-        update();
-      });
+      // Model and project filters are independent — every (model ×
+      // project) combination has its own panel, so the chart can show
+      // their intersection (e.g. "Opus usage in /path/to/project")
+      // without one filter resetting the other.
+      modelSel.addEventListener("change", update);
+      projectSel.addEventListener("change", update);
       function wireToggle(btns) {
         btns.forEach(function (btn) {
           btn.addEventListener("click", function () {
@@ -1566,10 +1553,13 @@ function renderHeatmap(
   // data-value attributes so the existing chart-tooltip handler picks
   // them up — same convention as bar rects and line dots.
   const cells: string[] = [];
-  // Month labels along the top: the first cell of each new month gets a
-  // small label above it. Tracking lastMonth across the column scan keeps
-  // us from labelling the same month twice when it spans many weeks.
-  const monthLabels: string[] = [];
+  // Month-label candidates (one per month change). We collect them first
+  // and emit them in a second pass so we can drop labels that would
+  // overlap their neighbor — happens when the heatmap window starts
+  // late in a month, leaving only ~1 column of that month visible
+  // before the next one starts. Without filtering, "Apr" and "May" land
+  // in adjacent columns and squish on top of each other.
+  const labelCandidates: { x: number; name: string }[] = [];
   let lastMonth = -1;
   for (let week = 0; week < numWeeks; week += 1) {
     for (let dow = 0; dow < 7; dow += 1) {
@@ -1585,26 +1575,43 @@ function renderHeatmap(
       cells.push(
         `<rect class="heatmap-cell" x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" ry="2" fill="${fillFor(val)}" data-date="${key}" data-value="${formatNumber(val)} ${escape(unit)}"></rect>`,
       );
-      // Month label sits above the column, anchored to the top cell of
-      // each week. We label only when the month changes from the prior
-      // labelled column so adjacent columns in the same month aren't
-      // double-labelled.
-      if (dow === 0) {
-        const month = monthOf(dayMs, localTime);
-        if (month !== lastMonth) {
-          lastMonth = month;
-          const monthName = d.toLocaleString("en-US", {
-            month: "short",
-            // No timeZone option in local mode → the formatter uses the
-            // host's tz, matching the localTime month index above.
-            ...(localTime ? {} : { timeZone: "UTC" }),
-          });
-          monthLabels.push(
-            `<text class="hm-label" x="${x}" y="${padding.top - 8}">${escape(monthName)}</text>`,
-          );
-        }
+      // Record a label candidate at the first cell of each new month
+      // (anchored to whichever cell — Sunday or otherwise — is the
+      // earliest visible day of the month). The dow !== 0 case matters
+      // for the very first column when its Sunday is before startMs.
+      const month = monthOf(dayMs, localTime);
+      if (month !== lastMonth) {
+        lastMonth = month;
+        const monthName = d.toLocaleString("en-US", {
+          month: "short",
+          // No timeZone option in local mode → the formatter uses the
+          // host's tz, matching the localTime month index above.
+          ...(localTime ? {} : { timeZone: "UTC" }),
+        });
+        labelCandidates.push({ x, name: monthName });
       }
     }
+  }
+
+  // Filter overlapping labels. Walk left→right; if a candidate is too
+  // close to the one we already kept, drop the *earlier* one (the new
+  // one is later in the year and corresponds to a longer-visible month,
+  // so it's the more useful label). 2 column-widths is enough room for
+  // a 3-letter month name in the 10px label font.
+  const minLabelSpacing = (cellSize + gap) * 2;
+  const monthLabels: string[] = [];
+  let lastX = -Infinity;
+  for (const c of labelCandidates) {
+    if (c.x - lastX < minLabelSpacing) {
+      // Replace the previous label (drop the earlier one) so that when
+      // months are squeezed together at the start, we keep the later
+      // label and discard the partial leading-month one.
+      if (monthLabels.length > 0) monthLabels.pop();
+    }
+    monthLabels.push(
+      `<text class="hm-label" x="${c.x}" y="${padding.top - 8}">${escape(c.name)}</text>`,
+    );
+    lastX = c.x;
   }
 
   // Weekday labels on the left. We only label Mon/Wed/Fri (rows 1/3/5) —

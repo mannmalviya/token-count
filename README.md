@@ -148,6 +148,11 @@ token-count stats --since 2026-04-01 --until 2026-04-19
 # Include an estimated USD cost column
 token-count stats --cost
 
+# Per-day rows are bucketed at your machine's local midnight by default
+# (so a session at 11pm shows up on the day you actually ran it). Pass
+# --utc to anchor to UTC midnight instead.
+token-count stats --utc
+
 # Re-import history from ~/.claude/projects/ at any time (safe, dedupes)
 token-count backfill
 ```
@@ -214,6 +219,11 @@ Settings (open with **Preferences: Open User Settings** → search
 
 - `tokenCount.rightStatusBar.enabled` (default `true`) — show/hide the
   right-side status bar item.
+- `tokenCount.useLocalTimezone` (default `true`) — bucket per-day stats
+  at your machine's local midnight. Turn off to bucket at UTC midnight
+  instead (matches `token-count stats --utc`). Affects the dashboard
+  charts, the sidebar cards, and the status bar tooltips. Toggling
+  applies immediately — no window reload required.
 
 ---
 

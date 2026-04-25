@@ -19,7 +19,8 @@ import {
 import {
   formatCount,
   formatNumber,
-  startOfTodayUTC,
+  startOfToday,
+  useLocalTimezone,
 } from "./format.js";
 
 /** Key under which we persist the ordered list of enabled stat ids. */
@@ -41,6 +42,9 @@ interface StatCtx {
   currentProject: string | undefined;
   today: Date;
   sevenDaysAgo: Date;
+  /** User's `tokenCount.useLocalTimezone` setting. Threaded through every
+   *  summarize() call so day rows + cutoffs land on the same boundary. */
+  localTime: boolean;
 }
 
 interface StatDef {
@@ -69,7 +73,11 @@ const STATS: Record<string, StatDef> = {
   "today-tokens": {
     label: "Today · Tokens",
     compute: (c) => {
-      const s = summarize(c.records, { groupBy: "day", since: c.today });
+      const s = summarize(c.records, {
+        groupBy: "day",
+        since: c.today,
+        localTime: c.localTime,
+      });
       return {
         main: formatCount(s.totals.total_tokens),
         sub: `${formatNumber(s.totals.total_tokens)} tokens`,
@@ -87,7 +95,11 @@ const STATS: Record<string, StatDef> = {
   "week-tokens": {
     label: "Last 7 days · Tokens",
     compute: (c) => {
-      const s = summarize(c.records, { groupBy: "day", since: c.sevenDaysAgo });
+      const s = summarize(c.records, {
+        groupBy: "day",
+        since: c.sevenDaysAgo,
+        localTime: c.localTime,
+      });
       return {
         main: formatCount(s.totals.total_tokens),
         sub: `${formatNumber(s.totals.total_tokens)} tokens`,
@@ -105,7 +117,10 @@ const STATS: Record<string, StatDef> = {
   "alltime-tokens": {
     label: "All time · Tokens",
     compute: (c) => {
-      const s = summarize(c.records, { groupBy: "day" });
+      const s = summarize(c.records, {
+        groupBy: "day",
+        localTime: c.localTime,
+      });
       return {
         main: formatCount(s.totals.total_tokens),
         sub: `${formatNumber(s.totals.total_tokens)} tokens`,
@@ -125,7 +140,11 @@ const STATS: Record<string, StatDef> = {
     compute: (c) => {
       const proj = c.currentProject!;
       const filtered = c.records.filter((r) => inProject(r.cwd, proj));
-      const s = summarize(filtered, { groupBy: "day", since: c.today });
+      const s = summarize(filtered, {
+        groupBy: "day",
+        since: c.today,
+        localTime: c.localTime,
+      });
       return {
         main: formatCount(s.totals.total_tokens),
         sub: `${formatNumber(s.totals.total_tokens)} tokens · this project`,
@@ -150,7 +169,10 @@ const STATS: Record<string, StatDef> = {
     compute: (c) => {
       const proj = c.currentProject!;
       const filtered = c.records.filter((r) => inProject(r.cwd, proj));
-      const s = summarize(filtered, { groupBy: "day" });
+      const s = summarize(filtered, {
+        groupBy: "day",
+        localTime: c.localTime,
+      });
       return {
         main: formatCount(s.totals.total_tokens),
         sub: `${formatNumber(s.totals.total_tokens)} tokens · this project`,
@@ -176,14 +198,20 @@ const STATS: Record<string, StatDef> = {
   "active-days": {
     label: "Active days",
     compute: (c) => {
-      const s = summarize(c.records, { groupBy: "day" });
+      const s = summarize(c.records, {
+        groupBy: "day",
+        localTime: c.localTime,
+      });
       return { main: formatNumber(s.groups.length), sub: "days with usage" };
     },
   },
   "msgs-per-day": {
     label: "Messages per active day",
     compute: (c) => {
-      const s = summarize(c.records, { groupBy: "day" });
+      const s = summarize(c.records, {
+        groupBy: "day",
+        localTime: c.localTime,
+      });
       const avg = s.groups.length > 0 ? c.prompts.length / s.groups.length : 0;
       return { main: avg.toFixed(1), sub: "avg messages per day" };
     },
@@ -301,7 +329,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
 
     const DAY_MS = 24 * 60 * 60 * 1000;
-    const today = startOfTodayUTC();
+    // Read the user's timezone setting once per render and reuse it for
+    // both the "today" boundary and every summarize() call below.
+    const localTime = useLocalTimezone();
+    const today = startOfToday(localTime);
     const sevenDaysAgo = new Date(today.getTime() - 6 * DAY_MS);
     // First open workspace folder is our "current project". If none is open
     // (bare window), project-scoped stats will hide themselves via the
@@ -315,6 +346,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
       currentProject,
       today,
       sevenDaysAgo,
+      localTime,
     };
 
     const enabled = this.getEnabled();

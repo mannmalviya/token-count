@@ -39,15 +39,26 @@ export function activate(context: vscode.ExtensionContext): void {
   // effect without requiring a window reload.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((ev) => {
-      if (!ev.affectsConfiguration("tokenCount.rightStatusBar.enabled")) return;
-      if (rightStatus) {
-        rightStatus.dispose();
-        rightStatus = undefined;
+      if (ev.affectsConfiguration("tokenCount.rightStatusBar.enabled")) {
+        if (rightStatus) {
+          rightStatus.dispose();
+          rightStatus = undefined;
+        }
+        rightStatus = createRightIfEnabled();
+        if (rightStatus) {
+          rightStatus.refresh();
+          context.subscriptions.push(rightStatus);
+        }
       }
-      rightStatus = createRightIfEnabled();
-      if (rightStatus) {
-        rightStatus.refresh();
-        context.subscriptions.push(rightStatus);
+      // Local-timezone toggle changes day boundaries everywhere, so re-
+      // render every surface that does day math. The setting reads itself
+      // (via useLocalTimezone()) inside each refresh path; we just need
+      // to fire the refreshes.
+      if (ev.affectsConfiguration("tokenCount.useLocalTimezone")) {
+        leftStatus.refresh();
+        rightStatus?.refresh();
+        sidebar.refresh();
+        DashboardPanel.refreshIfOpen();
       }
     }),
   );

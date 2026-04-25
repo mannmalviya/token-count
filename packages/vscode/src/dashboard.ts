@@ -11,12 +11,17 @@
 
 import * as vscode from "vscode";
 import {
+  dayKey,
+  monthOf,
   readAllPrompts,
   readAllRecords,
+  startOfDayMs,
   summarize,
+  weekday,
   type Summary,
   type TotalsBlock,
 } from "@token-count/core";
+import { useLocalTimezone } from "./format.js";
 
 export class DashboardPanel {
   // Static singleton — we don't want multiple dashboard panels fighting for
@@ -101,24 +106,30 @@ function renderHtml(
 
   const DAY_MS = 24 * 60 * 60 * 1000;
 
-  const now = new Date();
-  const startOfTodayUTC = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-  );
+  // Read the user's `tokenCount.useLocalTimezone` setting once. Threaded
+  // through every summarize() call below and into the chart renderers so
+  // day boundaries, x-axis labels, and the heatmap grid all agree.
+  const localTime = useLocalTimezone();
+
+  // "Today" = midnight in the chosen timezone, expressed as ms. We keep
+  // the variable name `startOfTodayUTC` for legacy reasons (lots of math
+  // below references it); when localTime is true, it's actually local
+  // midnight, not UTC. Renaming would churn ~30 lines for no gain.
+  const startOfTodayUTC = startOfDayMs(Date.now(), localTime);
 
   // --- Totals shown in the summary cards (unchanged). ---------------------
   const sevenDaysAgo = startOfTodayUTC - 6 * DAY_MS;
   const today = summarize(records, {
     groupBy: "day",
     since: new Date(startOfTodayUTC),
+    localTime,
   });
   const week = summarize(records, {
     groupBy: "day",
     since: new Date(sevenDaysAgo),
+    localTime,
   });
-  const allTime = summarize(records, { groupBy: "day" });
+  const allTime = summarize(records, { groupBy: "day", localTime });
   const byModel = summarize(records, { groupBy: "model" });
   const byProject = summarize(records, { groupBy: "project" });
 
@@ -186,11 +197,9 @@ function renderHtml(
   const earliestMs = records.length
     ? Math.min(...records.map((r) => Date.parse(r.ts)))
     : startOfTodayUTC;
-  const earliestDayUTC = Date.UTC(
-    new Date(earliestMs).getUTCFullYear(),
-    new Date(earliestMs).getUTCMonth(),
-    new Date(earliestMs).getUTCDate(),
-  );
+  // Snap to the start of the earliest day in the chosen timezone, so
+  // chart x-axes line up cleanly with the rest of the day buckets.
+  const earliestDayUTC = startOfDayMs(earliestMs, localTime);
   // `bucketDays` is how many consecutive days each bar represents. The past
   // year view rolls up to weekly bars so the chart doesn't become a dense
   // 365-bar wall; shorter views stay daily.
@@ -344,6 +353,7 @@ function renderHtml(
       const s = summarize(filtered, {
         groupBy: "day",
         since: new Date(sinceMs),
+        localTime,
       });
       byDay = new Map(s.groups.map((g) => [g.key, g.totals.total_tokens]));
     } else {
@@ -356,7 +366,9 @@ function renderHtml(
           if (primary !== m) continue;
         }
         if (pk !== ALL_PROJECTS && p.cwd !== pk) continue;
-        const day = new Date(ts).toISOString().slice(0, 10);
+        // dayKey honors localTime so message-day buckets line up with the
+        // token-day buckets summarize() produces above.
+        const day = dayKey(ts, localTime);
         byDay.set(day, (byDay.get(day) ?? 0) + 1);
       }
     }
@@ -377,11 +389,11 @@ function renderHtml(
     // r.startMs.
     let svg: string;
     if (c === "bars") {
-      svg = renderBarChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit);
+      svg = renderBarChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit, localTime);
     } else if (c === "line") {
-      svg = renderLineChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit);
+      svg = renderLineChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit, localTime);
     } else {
-      svg = renderHeatmap(byDay, heatmapStartMs, startOfTodayUTC, unit);
+      svg = renderHeatmap(byDay, heatmapStartMs, startOfTodayUTC, unit, localTime);
     }
     return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}" data-project="${escape(pk)}" data-chart="${c}" data-metric="${metric}">${svg}</div>`;
   };
@@ -1221,6 +1233,7 @@ function renderBarChart(
   endMs: number,
   bucketDays: number = 1,
   unit: string = "tokens",
+  localTime: boolean = false,
 ): string {
   const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -1233,11 +1246,13 @@ function renderBarChart(
     const bend = Math.min(bstart + (bucketDays - 1) * DAY_MS, endMs);
     let total = 0;
     for (let d = bstart; d <= bend; d += DAY_MS) {
-      const key = new Date(d).toISOString().slice(0, 10);
+      // Day keys honor localTime so the lookup hits the same key
+      // summarize() produced for byDay.
+      const key = dayKey(d, localTime);
       total += byDay.get(key) ?? 0;
     }
-    const startKey = new Date(bstart).toISOString().slice(0, 10);
-    const endKey = new Date(bend).toISOString().slice(0, 10);
+    const startKey = dayKey(bstart, localTime);
+    const endKey = dayKey(bend, localTime);
     const label = bucketDays === 1 ? startKey : `${startKey} to ${endKey}`;
     days.push({ key: startKey, label, value: total });
   }
@@ -1274,11 +1289,22 @@ function renderBarChart(
   // its weekday (Mon, Tue, ...). For longer windows that would just repeat
   // endlessly, so we fall back to MM-DD with a stride that keeps labels
   // ~60px apart and always pin the first + last day.
-  const weekdayOf = (key: string) =>
-    new Date(key + "T00:00:00Z").toLocaleDateString("en-US", {
+  // Weekday rendering: when localTime is on we parse the YYYY-MM-DD as a
+  // local-midnight Date (no Z suffix); when off we parse as UTC and force
+  // the formatter to UTC. The result is the weekday name corresponding
+  // to the bucket's start in the chosen timezone.
+  const weekdayOf = (key: string) => {
+    if (localTime) {
+      const [y, m, d] = key.split("-").map(Number);
+      return new Date(y!, m! - 1, d!).toLocaleDateString("en-US", {
+        weekday: "short",
+      });
+    }
+    return new Date(key + "T00:00:00Z").toLocaleDateString("en-US", {
       weekday: "short",
       timeZone: "UTC",
     });
+  };
   const xLabel = (i: number, text: string) => {
     const d = days[i];
     if (!d) return "";
@@ -1344,6 +1370,7 @@ function renderLineChart(
   endMs: number,
   bucketDays: number = 1,
   unit: string = "tokens",
+  localTime: boolean = false,
 ): string {
   const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -1352,11 +1379,11 @@ function renderLineChart(
     const bend = Math.min(bstart + (bucketDays - 1) * DAY_MS, endMs);
     let total = 0;
     for (let d = bstart; d <= bend; d += DAY_MS) {
-      const key = new Date(d).toISOString().slice(0, 10);
+      const key = dayKey(d, localTime);
       total += byDay.get(key) ?? 0;
     }
-    const startKey = new Date(bstart).toISOString().slice(0, 10);
-    const endKey = new Date(bend).toISOString().slice(0, 10);
+    const startKey = dayKey(bstart, localTime);
+    const endKey = dayKey(bend, localTime);
     const label = bucketDays === 1 ? startKey : `${startKey} to ${endKey}`;
     days.push({ key: startKey, label, value: total });
   }
@@ -1400,11 +1427,18 @@ function renderLineChart(
 
   // X-axis labels mirror renderBarChart exactly so swapping chart types
   // doesn't shift the x-axis reading of the data.
-  const weekdayOf = (key: string) =>
-    new Date(key + "T00:00:00Z").toLocaleDateString("en-US", {
+  const weekdayOf = (key: string) => {
+    if (localTime) {
+      const [y, m, d] = key.split("-").map(Number);
+      return new Date(y!, m! - 1, d!).toLocaleDateString("en-US", {
+        weekday: "short",
+      });
+    }
+    return new Date(key + "T00:00:00Z").toLocaleDateString("en-US", {
       weekday: "short",
       timeZone: "UTC",
     });
+  };
   const xLabel = (i: number, text: string) => {
     if (!days[i]) return "";
     const x = padding.left + (i + 0.5) * colW;
@@ -1476,15 +1510,17 @@ function renderHeatmap(
   startMs: number,
   endMs: number,
   unit: string = "tokens",
+  localTime: boolean = false,
 ): string {
   const DAY_MS = 24 * 60 * 60 * 1000;
 
   // The grid's first column is the ISO week containing startMs. We back
   // up to the prior Sunday so every column is a full 7-day stack — cells
   // before startMs are simply not drawn (gridStartMs..startMs is just
-  // empty whitespace at the top of the first column).
-  const startDate = new Date(startMs);
-  const startDow = startDate.getUTCDay(); // 0 = Sunday
+  // empty whitespace at the top of the first column). The "Sunday"
+  // boundary respects localTime so when the user opts into local time,
+  // the week starts on their local Sunday rather than UTC's.
+  const startDow = weekday(startMs, localTime); // 0 = Sunday
   const gridStartMs = startMs - startDow * DAY_MS;
 
   // Number of week columns we need to cover the whole [startMs, endMs]
@@ -1540,7 +1576,9 @@ function renderHeatmap(
       const dayMs = gridStartMs + (week * 7 + dow) * DAY_MS;
       if (dayMs < startMs || dayMs > endMs) continue;
       const d = new Date(dayMs);
-      const key = d.toISOString().slice(0, 10);
+      // Day key + month read use localTime so the heatmap aligns with
+      // the rest of the dashboard's day buckets.
+      const key = dayKey(dayMs, localTime);
       const val = byDay.get(key) ?? 0;
       const x = padding.left + week * (cellSize + gap);
       const y = padding.top + dow * (cellSize + gap);
@@ -1552,12 +1590,14 @@ function renderHeatmap(
       // labelled column so adjacent columns in the same month aren't
       // double-labelled.
       if (dow === 0) {
-        const month = d.getUTCMonth();
+        const month = monthOf(dayMs, localTime);
         if (month !== lastMonth) {
           lastMonth = month;
           const monthName = d.toLocaleString("en-US", {
             month: "short",
-            timeZone: "UTC",
+            // No timeZone option in local mode → the formatter uses the
+            // host's tz, matching the localTime month index above.
+            ...(localTime ? {} : { timeZone: "UTC" }),
           });
           monthLabels.push(
             `<text class="hm-label" x="${x}" y="${padding.top - 8}">${escape(monthName)}</text>`,

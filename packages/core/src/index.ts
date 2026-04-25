@@ -9,3 +9,4 @@ export * from "./storage.js";
 export * from "./aggregate.js";
 export * from "./backfill.js";
 export * from "./pricing.js";
+export * from "./dates.js";

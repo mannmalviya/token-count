@@ -146,6 +146,10 @@ Examples:
     .option(
       "--cost",
       "Add an 'API rate (USD)' column showing what these tokens would cost at Anthropic's per-token API rates. Claude Code subscriptions are flat-rate, so this is a reference value — not what you actually pay.",
+    )
+    .option(
+      "--utc",
+      "Bucket per-day rows at UTC midnight instead of your local-machine midnight. Default is local time so a session you ran at 11pm shows up on the day you actually ran it; pass --utc when you need numbers that match other UTC-anchored views.",
     );
   statsCmd.addHelpText(
     "after",
@@ -157,7 +161,7 @@ Examples:
   $ token-count stats --since 2026-04-01 --until 2026-04-15
                                                       Restrict to a date window`,
   );
-  statsCmd.action((opts: { by?: string; since?: string; until?: string; cost?: boolean }) => {
+  statsCmd.action((opts: { by?: string; since?: string; until?: string; cost?: boolean; utc?: boolean }) => {
       const by = opts.by as GroupBy;
       if (!["day", "model", "project"].includes(by)) {
         console.error(`--by must be one of: day, model, project (got "${opts.by}")`);
@@ -168,6 +172,8 @@ Examples:
         since: opts.since ? new Date(opts.since) : undefined,
         until: opts.until ? new Date(opts.until) : undefined,
         cost: opts.cost,
+        // Default to local time. `--utc` flips back to UTC bucketing.
+        localTime: !opts.utc,
       });
       process.stdout.write(output);
     });

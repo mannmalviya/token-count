@@ -44,6 +44,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show a second status bar item on the right with a rich hover tooltip quick-peek."
+        },
+        "tokenCount.useLocalTimezone": {
+          "type": "boolean",
+          "default": true,
+          "description": "Bucket per-day stats at your machine's local-midnight boundary (default). Turn off to bucket at UTC midnight instead — useful if you want numbers to match the CLI's --utc output exactly. Affects the dashboard charts, the sidebar, and the status bar tooltips."
         }
       }
     }

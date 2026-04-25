@@ -15,7 +15,12 @@ import {
   summarize,
   type UsageRecord,
 } from "@token-count/core";
-import { formatCount, formatNumber, startOfTodayUTC } from "./format.js";
+import {
+  formatCount,
+  formatNumber,
+  startOfToday,
+  useLocalTimezone,
+} from "./format.js";
 
 export class RightStatusBarController {
   private item: vscode.StatusBarItem;
@@ -44,12 +49,24 @@ export class RightStatusBarController {
       const prompts = readAllPrompts();
 
       const DAY_MS = 24 * 60 * 60 * 1000;
-      const today = startOfTodayUTC();
+      // localTime threads the user's setting through both the today/week
+      // boundaries and the day bucketing inside summarize, so all three
+      // numbers stay consistent with each other (and with the dashboard).
+      const localTime = useLocalTimezone();
+      const today = startOfToday(localTime);
       const sevenDaysAgo = new Date(today.getTime() - 6 * DAY_MS);
 
-      const todaySum = summarize(records, { groupBy: "day", since: today });
-      const weekSum = summarize(records, { groupBy: "day", since: sevenDaysAgo });
-      const allSum = summarize(records, { groupBy: "day" });
+      const todaySum = summarize(records, {
+        groupBy: "day",
+        since: today,
+        localTime,
+      });
+      const weekSum = summarize(records, {
+        groupBy: "day",
+        since: sevenDaysAgo,
+        localTime,
+      });
+      const allSum = summarize(records, { groupBy: "day", localTime });
 
       // Use a different icon from the left item so users can tell at a
       // glance that these are two different views on the same data.

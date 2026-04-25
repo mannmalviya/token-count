@@ -12,6 +12,7 @@
 // and lets us keep the Claude-orange accent on the header row.
 
 import {
+  dayKey,
   readAllPrompts,
   readAllRecords,
   summarize,
@@ -29,6 +30,13 @@ export interface StatsOptions {
   until?: Date;
   /** Show an estimated USD cost column. See core/pricing.ts for rates. */
   cost?: boolean;
+  /**
+   * Bucket "day" rows at the machine's local-midnight boundary when
+   * true (the default at the CLI layer), or at UTC midnight when false.
+   * See core/dates.ts for the helper. Has no effect when grouping by
+   * model or project.
+   */
+  localTime?: boolean;
 }
 
 export interface StatsResult {
@@ -44,10 +52,13 @@ export function runStats(opts: StatsOptions): StatsResult {
   // column instead of omitting messages on fresh installs.
   const prompts = readAllPrompts();
   // Translate the cli-facing `by` flag into core's `groupBy` option.
+  // localTime threads through so day rows bucket at local midnight when
+  // the user passed --local.
   const summary = summarize(records, {
     groupBy: opts.by,
     since: opts.since,
     until: opts.until,
+    localTime: opts.localTime,
   });
 
   if (summary.totals.record_count === 0) {
@@ -68,6 +79,7 @@ export function runStats(opts: StatsOptions): StatsResult {
     opts.by,
     opts.since,
     opts.until,
+    opts.localTime,
   );
   const totalMessages = Array.from(messageCounts.values()).reduce(
     (s, n) => s + n,
@@ -141,6 +153,7 @@ function countPromptsByGroup(
   by: GroupBy,
   since?: Date,
   until?: Date,
+  localTime?: boolean,
 ): Map<string, number> {
   const counts = new Map<string, number>();
 
@@ -180,7 +193,9 @@ function countPromptsByGroup(
 
     let key: string | undefined;
     if (by === "day") {
-      key = new Date(t).toISOString().slice(0, 10);
+      // Use the same dayKey helper that summarize() uses, so day rows in
+      // the table line up with the message counts on each row.
+      key = dayKey(t, localTime ?? false);
     } else if (by === "project") {
       key = p.cwd;
     } else {

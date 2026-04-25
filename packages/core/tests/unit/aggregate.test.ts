@@ -104,6 +104,35 @@ describe("summarize", () => {
     expect(s.groups.map((g) => g.key).sort()).toEqual(["/proj/a", "/proj/b"]);
   });
 
+  it("groupBy day with localTime: true buckets at local midnight", () => {
+    // We can't pin a specific timezone in vitest without TZ-mocking, so
+    // we assert a property that's true regardless of host TZ:
+    //   for any record ts, the localTime key matches what the local-time
+    //   accessors of `new Date(ts)` produce.
+    const ts1 = "2026-04-19T00:30:00.000Z";
+    const ts2 = "2026-04-19T23:59:00.000Z";
+    const expectedKey = (iso: string) => {
+      const d = new Date(iso);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+    const s = summarize(
+      [
+        rec({ ts: ts1, output_tokens: 5 }),
+        rec({ ts: ts2, output_tokens: 7 }),
+      ],
+      { groupBy: "day", localTime: true },
+    );
+    const keys = s.groups.map((g) => g.key);
+    // Each input ts should map to exactly the day its local Date renders.
+    expect(keys).toContain(expectedKey(ts1));
+    expect(keys).toContain(expectedKey(ts2));
+    // Token totals are preserved regardless of bucketing.
+    expect(s.totals.total_tokens).toBe(12);
+  });
+
   it("filters records by since/until (inclusive since, exclusive until)", () => {
     const s = summarize(
       [

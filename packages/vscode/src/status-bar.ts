@@ -9,7 +9,7 @@
 
 import * as vscode from "vscode";
 import { readAllRecords, summarize } from "@token-count/core";
-import { formatCount, startOfTodayUTC } from "./format.js";
+import { formatCount, startOfToday, useLocalTimezone } from "./format.js";
 
 /**
  * Small wrapper around a VSCode StatusBarItem. The class exists so we can
@@ -40,8 +40,15 @@ export class StatusBarController {
   refresh(): void {
     try {
       const records = readAllRecords();
-      const today = startOfTodayUTC();
-      const summary = summarize(records, { groupBy: "day", since: today });
+      // Honor the user's local-timezone setting for both "today" boundary
+      // and the day bucketing inside summarize.
+      const localTime = useLocalTimezone();
+      const today = startOfToday(localTime);
+      const summary = summarize(records, {
+        groupBy: "day",
+        since: today,
+        localTime,
+      });
       this.item.text = `$(symbol-number) ${formatCount(summary.totals.total_tokens)} today`;
     } catch (err) {
       // Never let a stale file crash the status bar.

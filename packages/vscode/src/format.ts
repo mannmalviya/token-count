@@ -2,13 +2,34 @@
 // view. Kept as plain functions (no class) so they can be imported without
 // any setup cost.
 
+import * as vscode from "vscode";
+
 /**
- * Midnight UTC of today. We use UTC so that "today" matches the aggregation
- * in the CLI and the dashboard — mixing time zones would produce numbers
- * that disagree between surfaces.
+ * Read the user's `tokenCount.useLocalTimezone` setting. Default is
+ * true so that out-of-the-box, day buckets line up with the user's
+ * actual local calendar (the more intuitive behavior). Users who want
+ * UTC bucketing — e.g. for parity with `token-count stats --utc` — can
+ * flip the setting off.
+ *
+ * Centralized here so we can't accidentally drift between surfaces (every
+ * surface that does day math has to read this same flag).
  */
-export function startOfTodayUTC(): Date {
+export function useLocalTimezone(): boolean {
+  return vscode.workspace
+    .getConfiguration("tokenCount")
+    .get<boolean>("useLocalTimezone", true);
+}
+
+/**
+ * Midnight at the start of "today" in either UTC or the user's local
+ * timezone. Pass the result of `useLocalTimezone()` so all surfaces stay
+ * in sync with the setting.
+ */
+export function startOfToday(localTime: boolean): Date {
   const now = new Date();
+  if (localTime) {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
   return new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
   );

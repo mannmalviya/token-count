@@ -6,6 +6,7 @@
 
 import type { UsageRecord } from "./types.js";
 import { estimateRecordCost } from "./pricing.js";
+import { dayKey } from "./dates.js";
 
 // ---------------------------------------------------------------------------
 // Output shapes.
@@ -46,6 +47,16 @@ export interface SummarizeOptions {
   since?: Date;
   /** If set, records with ts >= until are excluded (exclusive on `until`). */
   until?: Date;
+  /**
+   * When `groupBy === "day"`, controls which calendar day boundary to
+   * bucket on. False (default) keeps the historical UTC behavior so all
+   * surfaces agree out-of-the-box. True buckets at the machine's local
+   * midnight — useful when a user wants "11pm activity" to land on the
+   * day they actually used the tool.
+   *
+   * Ignored when grouping by model or project (no day math involved).
+   */
+  localTime?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,10 +87,12 @@ export function summarize(
   const totals = emptyTotals();
   for (const r of filtered) addInto(totals, r);
 
-  // 3. Bucket by the requested key.
+  // 3. Bucket by the requested key. localTime defaults to false so the
+  //    historical UTC bucketing is preserved when callers don't pass it.
+  const localTime = opts.localTime ?? false;
   const buckets = new Map<string, TotalsBlock>();
   for (const r of filtered) {
-    const key = bucketKey(r, opts.groupBy);
+    const key = bucketKey(r, opts.groupBy, localTime);
     let t = buckets.get(key);
     if (!t) {
       t = emptyTotals();
@@ -139,12 +152,14 @@ function addInto(acc: TotalsBlock, r: UsageRecord): void {
 }
 
 // Pick the grouping key for a single record.
-function bucketKey(r: UsageRecord, by: GroupBy): string {
+function bucketKey(r: UsageRecord, by: GroupBy, localTime: boolean): string {
   switch (by) {
     case "day":
-      // Slice the ISO string to "YYYY-MM-DD". The record timestamp is
-      // already UTC (Date.toISOString style), so no TZ math needed.
-      return r.ts.slice(0, 10);
+      // Day key respects the localTime flag: in UTC mode we can shortcut
+      // by slicing the ISO string (record ts is already in ISO/UTC form);
+      // in local mode we go through dayKey() which uses local-time
+      // accessors.
+      return localTime ? dayKey(Date.parse(r.ts), true) : r.ts.slice(0, 10);
     case "model":
       return r.model;
     case "project":

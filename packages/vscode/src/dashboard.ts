@@ -230,15 +230,25 @@ function renderHtml(
   ].join("");
 
   // Chart-type toggle. "bars" is the historical default; "line" draws a
-  // connected line with an area fill and hover dots on each data point.
-  // Rendered as a two-button segmented control, not a dropdown, so the
-  // active mode is visible at a glance and switching is one click.
-  const chartTypes = ["bars", "line"] as const;
-  const defaultChart: (typeof chartTypes)[number] = "bars";
+  // connected line with an area fill and hover dots on each data point;
+  // "heatmap" is a GitHub-style calendar grid (weeks-as-columns, days as
+  // rows) tinted in the Claude orange palette. Rendered as a segmented
+  // control, not a dropdown, so the active mode is visible at a glance
+  // and switching is one click.
+  const chartTypes = ["heatmap", "bars", "line"] as const;
+  const defaultChart: (typeof chartTypes)[number] = "heatmap";
+  // Display label per chart type. `as const` plus the `Record` type pin the
+  // map's keys to exactly the chartTypes tuple, so TS will flag us if we
+  // ever add a new chart type and forget to give it a button label.
+  const chartLabels: Record<(typeof chartTypes)[number], string> = {
+    bars: "Bars",
+    line: "Line",
+    heatmap: "Heatmap",
+  };
   const chartToggle = chartTypes
     .map(
       (c) =>
-        `<button type="button" class="toggle-btn${c === defaultChart ? " active" : ""}" data-chart="${c}">${c === "bars" ? "Bars" : "Line"}</button>`,
+        `<button type="button" class="toggle-btn${c === defaultChart ? " active" : ""}" data-chart="${c}">${chartLabels[c]}</button>`,
     )
     .join("");
 
@@ -302,6 +312,17 @@ function renderHtml(
   // families of panels (per-model and per-project) without duplicating the
   // byDay + svg logic.
   const modelKeys = [ALL_MODELS, ...modelList];
+
+  // The heatmap is always a fixed past-year window, GitHub-style. The
+  // whole point of a heatmap is "year at a glance", so the timeframe
+  // selector (week/month/year/all) doesn't apply to it — we override the
+  // data window here regardless of which range the user picked. We still
+  // emit a heatmap panel for every range value so the panel-matching JS
+  // stays uniform (range × model × project × chart × metric); all four
+  // range variants of a given heatmap render identical content.
+  const HEATMAP_DAYS = 365;
+  const heatmapStartMs = startOfTodayUTC - (HEATMAP_DAYS - 1) * DAY_MS;
+
   const buildPanel = (
     r: (typeof ranges)[number],
     m: string,
@@ -309,6 +330,9 @@ function renderHtml(
     c: (typeof chartTypes)[number],
     metric: (typeof metrics)[number],
   ): string => {
+    // Heatmap uses its fixed year window; bar/line use the selected range.
+    const sinceMs = c === "heatmap" ? heatmapStartMs : r.startMs;
+
     // Tokens: sum total_tokens per day from filtered records. Messages:
     // count prompts per day. Both respect the model filter (via primary
     // model per session for prompts) and the project filter.
@@ -319,14 +343,14 @@ function renderHtml(
       if (pk !== ALL_PROJECTS) filtered = filtered.filter((rec) => rec.cwd === pk);
       const s = summarize(filtered, {
         groupBy: "day",
-        since: new Date(r.startMs),
+        since: new Date(sinceMs),
       });
       byDay = new Map(s.groups.map((g) => [g.key, g.totals.total_tokens]));
     } else {
       byDay = new Map();
       for (const p of prompts) {
         const ts = Date.parse(p.ts);
-        if (ts < r.startMs) continue;
+        if (ts < sinceMs) continue;
         if (m !== ALL_MODELS) {
           const primary = primaryModelBySession.get(p.session_id);
           if (primary !== m) continue;
@@ -345,10 +369,20 @@ function renderHtml(
       metric === defaultMetric
         ? ""
         : " hidden";
-    const svg =
-      c === "bars"
-        ? renderBarChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit)
-        : renderLineChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit);
+    // Dispatch on chart type. Bar + line share `bucketDays` (so the year
+    // view rolls up into weekly bars). The heatmap is inherently a daily
+    // grid — weekly buckets would defeat the point — so it ignores
+    // bucketDays and walks the range one day at a time. The heatmap also
+    // uses the fixed `heatmapStartMs` window (see above) instead of
+    // r.startMs.
+    let svg: string;
+    if (c === "bars") {
+      svg = renderBarChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit);
+    } else if (c === "line") {
+      svg = renderLineChart(byDay, r.startMs, startOfTodayUTC, r.bucketDays, unit);
+    } else {
+      svg = renderHeatmap(byDay, heatmapStartMs, startOfTodayUTC, unit);
+    }
     return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}" data-project="${escape(pk)}" data-chart="${c}" data-metric="${metric}">${svg}</div>`;
   };
 
@@ -390,6 +424,15 @@ function renderHtml(
     --tc-accent: #D97757;
     --tc-accent-strong: #C26240;
     --tc-accent-soft: rgba(217, 119, 87, 0.15);
+    /* Heatmap palette: 0 = no activity (faint neutral so the grid is
+       still visible on both light and dark themes); 1-4 = increasing
+       intensities of the Claude orange. We use rgba on the same hex so
+       all four steps share a hue and just differ in opacity. */
+    --tc-heatmap-0: rgba(127, 127, 127, 0.14);
+    --tc-heatmap-1: rgba(217, 119, 87, 0.30);
+    --tc-heatmap-2: rgba(217, 119, 87, 0.55);
+    --tc-heatmap-3: rgba(217, 119, 87, 0.80);
+    --tc-heatmap-4: #D97757;
   }
   body {
     font-family: var(--vscode-font-family);
@@ -463,6 +506,28 @@ function renderHtml(
   }
   svg text { fill: var(--vscode-foreground); font-size: 10px; }
 
+  /* Heatmap (GitHub-style calendar grid).
+     The fill is set inline per-cell via the SVG fill attribute pointing
+     at one of these CSS variables, so the cell's intensity bucket is
+     purely a CSS concern (themes can retint without touching the
+     renderer). Bucket 0 (no activity) is a faint neutral so empty cells
+     still read as a grid; buckets 1-4 are increasing strengths of the
+     Claude orange. */
+  svg .heatmap-cell {
+    stroke: transparent;
+    stroke-width: 1;
+    transition: filter 0.1s, stroke 0.1s;
+  }
+  svg .heatmap-cell:hover {
+    filter: brightness(1.15);
+    stroke: var(--vscode-foreground);
+  }
+  svg .hm-label {
+    fill: var(--vscode-foreground);
+    font-size: 10px;
+    opacity: 0.6;
+  }
+
   /* Custom hover tooltip. Positioned with inline JS so it tracks the mouse.
      Kept hidden by default; shown when the .visible class is set. */
   #chart-tooltip {
@@ -484,8 +549,27 @@ function renderHtml(
   #chart-tooltip .tokens { font-variant-numeric: tabular-nums; margin-top: 2px; }
 
   /* Timeframe dropdown above the chart. Uses VSCode's dropdown theme vars
-     so it blends with the active color scheme. */
-  .range-select { margin: 12px 0; }
+     so it blends with the active color scheme.
+
+     Layout note: .range-select is a flex row with flex-wrap: wrap and a
+     row/column gap. When the panel gets too narrow for all the controls
+     to fit on one line, items spill onto a second row with the same
+     vertical breathing room (the row-gap, 8px) as the horizontal spacing
+     between controls (the column-gap, 16px). Without this, the wrapped
+     controls would just butt up against the row above with only
+     line-height spacing and look cramped. */
+  .range-select {
+    margin: 12px 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 16px;
+  }
+  /* Each label+select pair is wrapped in a .range-control span so the
+     label can't wrap away from its <select> when the row breaks. The
+     span is the flex item; the label/select inside it stay inline. */
+  .range-control { display: inline-flex; align-items: center; gap: 6px; }
+  .range-control label { white-space: nowrap; }
   .range-select select {
     background: var(--vscode-dropdown-background);
     color: var(--vscode-dropdown-foreground);
@@ -702,14 +786,11 @@ function renderHtml(
 
   <h2 id="tokens-per-day">Tokens per day</h2>
   <div class="range-select">
-    <label for="range">Timeframe: </label>
-    <select id="range">${options}</select>
-    <label for="model" style="margin-left: 16px;">Model: </label>
-    <select id="model">${modelOptions}</select>
-    <label for="project" style="margin-left: 16px;">Project: </label>
-    <select id="project">${projectOptions}</select>
-    <span class="toggle-group" role="group" aria-label="Chart type" id="chart-toggle" style="margin-left: 16px;">${chartToggle}</span>
-    <span class="toggle-group" role="group" aria-label="Metric" id="metric-toggle" style="margin-left: 8px;">${metricToggle}</span>
+    <span class="range-control"><label for="range">Timeframe:</label><select id="range">${options}</select></span>
+    <span class="range-control"><label for="model">Model:</label><select id="model">${modelOptions}</select></span>
+    <span class="range-control"><label for="project">Project:</label><select id="project">${projectOptions}</select></span>
+    <span class="toggle-group" role="group" aria-label="Chart type" id="chart-toggle">${chartToggle}</span>
+    <span class="toggle-group" role="group" aria-label="Metric" id="metric-toggle">${metricToggle}</span>
   </div>
   ${panels}
   <div id="chart-tooltip" role="tooltip" aria-hidden="true"></div>
@@ -769,7 +850,7 @@ function renderHtml(
         const r = rangeSel.value;
         const m = modelSel.value;
         const pj = projectSel.value;
-        const c = activeValue(chartBtns, "data-chart", "bars");
+        const c = activeValue(chartBtns, "data-chart", "heatmap");
         const metric = activeValue(metricBtns, "data-metric", "tokens");
         panels.forEach(function (p) {
           const match =
@@ -873,11 +954,17 @@ function renderHtml(
       panels.forEach(function (panel) {
         panel.addEventListener("mousemove", function (ev) {
           const target = ev.target;
-          // Bars (rects) and line-chart points (circles) both use class="bar"
-          // as the hover marker. Anything else: hide the tooltip.
+          // Bars (rects) and line-chart points (circles) use class="bar"
+          // as the hover marker; heatmap cells use class="heatmap-cell"
+          // (different class so they don't pick up the bar's solid-orange
+          // fill rule). Either one triggers the tooltip; anything else
+          // hides it.
           if (
             !(target instanceof Element) ||
-            !target.classList.contains("bar")
+            !(
+              target.classList.contains("bar") ||
+              target.classList.contains("heatmap-cell")
+            )
           ) {
             tooltip.classList.remove("visible");
             return;
@@ -1367,6 +1454,134 @@ function renderLineChart(
     ${dots}
     ${labels}
     ${yTicks.join("")}
+  </svg>`;
+}
+
+/**
+ * GitHub-style calendar heatmap. Days are arranged in a grid where each
+ * column is one ISO week and each row is a weekday (Sun..Sat top→bottom).
+ * Each cell is tinted by how much activity (tokens or messages) happened
+ * that day, on a 5-step scale of the Claude orange accent.
+ *
+ * This renderer is daily-only on purpose: a heatmap of weekly buckets
+ * defeats the visual point, so we ignore the bucketDays the bar/line
+ * charts use for the "year" view and walk the range one day at a time.
+ *
+ * Data shape: `byDay` is keyed by UTC ISO date string ("YYYY-MM-DD"),
+ * same as the input to renderBarChart. We look each day up directly;
+ * missing days fall back to 0 (which renders as the empty bucket).
+ */
+function renderHeatmap(
+  byDay: Map<string, number>,
+  startMs: number,
+  endMs: number,
+  unit: string = "tokens",
+): string {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  // The grid's first column is the ISO week containing startMs. We back
+  // up to the prior Sunday so every column is a full 7-day stack — cells
+  // before startMs are simply not drawn (gridStartMs..startMs is just
+  // empty whitespace at the top of the first column).
+  const startDate = new Date(startMs);
+  const startDow = startDate.getUTCDay(); // 0 = Sunday
+  const gridStartMs = startMs - startDow * DAY_MS;
+
+  // Number of week columns we need to cover the whole [startMs, endMs]
+  // window. ceil because a partial week at the right edge still gets a
+  // column (the remaining days render; the trailing future days don't).
+  const totalDays = Math.floor((endMs - gridStartMs) / DAY_MS) + 1;
+  const numWeeks = Math.max(1, Math.ceil(totalDays / 7));
+
+  // Sizing. We aim to match the bar/line chart's ~900px wide footprint so
+  // all three chart types feel like they belong to the same page. Cell
+  // size scales with the number of weeks: short ranges (1 column) cap at
+  // MAX_CELL so cells don't blow up to absurd sizes, and long ranges
+  // (53+ columns for "all time" with years of data) shrink to MIN_CELL
+  // before we stop shrinking.
+  const width = 900;
+  const padding = { top: 22, right: 10, bottom: 12, left: 32 };
+  const gap = 2;
+  const MAX_CELL = 16;
+  const MIN_CELL = 8;
+  const availW = width - padding.left - padding.right - (numWeeks - 1) * gap;
+  const cellSize = Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor(availW / numWeeks)));
+  const gridH = 7 * cellSize + 6 * gap;
+  const height = padding.top + gridH + padding.bottom;
+
+  // Color bucket for a day. Linear scale by max non-zero day so the
+  // hottest day always lands in bucket 4 — this matches user intuition
+  // ("darkest = highest"). Quantile-based bucketing would smooth out
+  // outliers but lose the "this was your peak day" signal we want here.
+  let dayMax = 0;
+  for (const v of byDay.values()) if (v > dayMax) dayMax = v;
+  const fillFor = (v: number): string => {
+    if (v <= 0 || dayMax === 0) return "var(--tc-heatmap-0)";
+    const frac = v / dayMax;
+    if (frac <= 0.25) return "var(--tc-heatmap-1)";
+    if (frac <= 0.5) return "var(--tc-heatmap-2)";
+    if (frac <= 0.75) return "var(--tc-heatmap-3)";
+    return "var(--tc-heatmap-4)";
+  };
+
+  // Walk every day in [gridStartMs, endMs]. Days outside [startMs, endMs]
+  // are skipped (so the grid leaves blank space at the top of the first
+  // column for the partial leading week). Each cell carries data-date /
+  // data-value attributes so the existing chart-tooltip handler picks
+  // them up — same convention as bar rects and line dots.
+  const cells: string[] = [];
+  // Month labels along the top: the first cell of each new month gets a
+  // small label above it. Tracking lastMonth across the column scan keeps
+  // us from labelling the same month twice when it spans many weeks.
+  const monthLabels: string[] = [];
+  let lastMonth = -1;
+  for (let week = 0; week < numWeeks; week += 1) {
+    for (let dow = 0; dow < 7; dow += 1) {
+      const dayMs = gridStartMs + (week * 7 + dow) * DAY_MS;
+      if (dayMs < startMs || dayMs > endMs) continue;
+      const d = new Date(dayMs);
+      const key = d.toISOString().slice(0, 10);
+      const val = byDay.get(key) ?? 0;
+      const x = padding.left + week * (cellSize + gap);
+      const y = padding.top + dow * (cellSize + gap);
+      cells.push(
+        `<rect class="heatmap-cell" x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" ry="2" fill="${fillFor(val)}" data-date="${key}" data-value="${formatNumber(val)} ${escape(unit)}"></rect>`,
+      );
+      // Month label sits above the column, anchored to the top cell of
+      // each week. We label only when the month changes from the prior
+      // labelled column so adjacent columns in the same month aren't
+      // double-labelled.
+      if (dow === 0) {
+        const month = d.getUTCMonth();
+        if (month !== lastMonth) {
+          lastMonth = month;
+          const monthName = d.toLocaleString("en-US", {
+            month: "short",
+            timeZone: "UTC",
+          });
+          monthLabels.push(
+            `<text class="hm-label" x="${x}" y="${padding.top - 8}">${escape(monthName)}</text>`,
+          );
+        }
+      }
+    }
+  }
+
+  // Weekday labels on the left. We only label Mon/Wed/Fri (rows 1/3/5) —
+  // labelling all seven crowds the gutter, and three labels is the
+  // standard GitHub convention.
+  const weekdayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const weekdayLabels = [1, 3, 5]
+    .map((dow) => {
+      const y = padding.top + dow * (cellSize + gap) + cellSize - 2;
+      return `<text class="hm-label" x="${padding.left - 6}" y="${y}" text-anchor="end">${weekdayNames[dow]}</text>`;
+    })
+    .join("");
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}">
+    ${monthLabels.join("")}
+    ${weekdayLabels}
+    ${cells.join("")}
   </svg>`;
 }
 

@@ -10,18 +10,55 @@
 // reveals the existing one.
 
 import * as vscode from "vscode";
+import * as fs from "node:fs";
 import {
   dayKey,
   monthOf,
+  promptsJsonlPath,
   readAllPrompts,
   readAllRecords,
   startOfDayMs,
   summarize,
+  usageJsonlPath,
   weekday,
   type Summary,
   type TotalsBlock,
 } from "@token-count/core";
 import { useLocalTimezone } from "./format.js";
+
+// Module-level cache of the last rendered dashboard HTML. Survives panel
+// close/reopen within the same VSCode session, so closing the dashboard
+// and immediately reopening it is effectively free when nothing has
+// changed since.
+//
+// Cache key components — any of these changing forces a rebuild:
+//   - usageMtime / promptsMtime: a new record/prompt was appended.
+//   - localTime: the user toggled `tokenCount.useLocalTimezone`, which
+//     changes day boundaries everywhere.
+//
+// We deliberately don't track byte size or content hashes — mtime is
+// sufficient because the data files are append-only (per CLAUDE.md);
+// any new content guarantees a newer mtime.
+interface DashboardCache {
+  html: string;
+  usageMtime: number;
+  promptsMtime: number;
+  localTime: boolean;
+}
+let dashboardCache: DashboardCache | undefined;
+
+/**
+ * Modification time of a file in ms, or 0 if the file doesn't exist
+ * yet. Returning 0 (rather than throwing) lets the cache key be stable
+ * for fresh installs that haven't yet written usage.jsonl.
+ */
+function mtimeMs(p: string): number {
+  try {
+    return fs.statSync(p).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
 
 export class DashboardPanel {
   // Static singleton — we don't want multiple dashboard panels fighting for
@@ -30,6 +67,14 @@ export class DashboardPanel {
 
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
+  // True until the panel has shown its first real (non-loading) frame.
+  // Used to gate the loading animation: we always show it on the first
+  // paint of a new panel (covers "open after close", which is the case
+  // the user noticed was missing the loader), but skip it for reveals
+  // of an already-painted panel and for file-watcher refreshes — those
+  // already have visible content and a loader flash would just disrupt
+  // the user's view.
+  private firstPaint = true;
 
   private constructor(panel: vscode.WebviewPanel) {
     this.panel = panel;
@@ -63,15 +108,94 @@ export class DashboardPanel {
 
   /**
    * Re-render the HTML from the current usage.jsonl. Called by extension.ts
-   * whenever the file changes (via FileSystemWatcher).
+   * whenever the file changes (via FileSystemWatcher), and on every panel
+   * open / reveal.
+   *
+   * Two paths through this function:
+   *
+   * 1. **First paint of a new panel** (firstPaint === true). The webview
+   *    is empty, so we always show the loading animation first — even
+   *    on a cache hit — and hold it for a minimum display time so the
+   *    animation is actually visible. Then we swap in the real HTML.
+   *    This covers both "open for the first time" and "close + reopen".
+   *
+   * 2. **Subsequent refreshes** (firstPaint === false): file-watcher
+   *    updates and reveals of an already-painted panel. The webview
+   *    already has visible content — flashing the loader here would
+   *    disrupt the user's view. We swap in the new HTML directly.
+   *
+   * Uses a module-level cache keyed on file mtimes + the localTime
+   * setting — if nothing has changed since the last render, we reuse
+   * the cached HTML string and skip the rebuild work entirely. The
+   * cache survives panel close/reopen within the same VSCode session.
    */
   refresh(): void {
     try {
-      const records = readAllRecords();
-      const prompts = readAllPrompts();
-      this.panel.webview.html = renderHtml(records, prompts);
+      const usageMtime = mtimeMs(usageJsonlPath());
+      const promptsMtime = mtimeMs(promptsJsonlPath());
+      const localTime = useLocalTimezone();
+
+      // Build (or reuse) the real HTML. Cheap on cache hits.
+      const buildReal = (): string => {
+        if (
+          dashboardCache &&
+          dashboardCache.usageMtime === usageMtime &&
+          dashboardCache.promptsMtime === promptsMtime &&
+          dashboardCache.localTime === localTime
+        ) {
+          return dashboardCache.html;
+        }
+        const records = readAllRecords();
+        const prompts = readAllPrompts();
+        const html = renderHtml(records, prompts);
+        dashboardCache = { html, usageMtime, promptsMtime, localTime };
+        return html;
+      };
+
+      if (!this.firstPaint) {
+        // Path 2: panel already showing real content. Just swap.
+        this.panel.webview.html = buildReal();
+        return;
+      }
+
+      // Path 1: new panel. Show loader, then swap to real after a
+      // minimum display time so the user actually sees the animation
+      // even when the build is fast (cache hit ≈ 0ms, cold ≈ 100ms).
+      // 600ms gives the orange dots roughly half a pulse cycle and is
+      // long enough to register the quote without feeling slow.
+      this.panel.webview.html = renderLoading();
+      this.firstPaint = false;
+      const startTs = Date.now();
+      const MIN_LOADING_MS = 600;
+
+      // Defer the heavy work to setImmediate so the webview has a tick
+      // to actually paint the loading frame before we lock the event
+      // loop building the dashboard HTML.
+      setImmediate(() => {
+        if (DashboardPanel.current !== this) return;
+        let html: string;
+        try {
+          html = buildReal();
+        } catch (err) {
+          html = renderError(err);
+        }
+        const elapsed = Date.now() - startTs;
+        const remaining = Math.max(0, MIN_LOADING_MS - elapsed);
+        setTimeout(() => {
+          if (DashboardPanel.current !== this) return;
+          try {
+            this.panel.webview.html = html;
+          } catch {
+            /* webview disposed mid-build — nothing to do. */
+          }
+        }, remaining);
+      });
     } catch (err) {
-      this.panel.webview.html = renderError(err);
+      try {
+        this.panel.webview.html = renderError(err);
+      } catch {
+        /* webview disposed — nothing to do. */
+      }
     }
   }
 
@@ -133,6 +257,17 @@ function renderHtml(
   const byModel = summarize(records, { groupBy: "model" });
   const byProject = summarize(records, { groupBy: "project" });
 
+  // Per-card prompt counts. Same windows as the token totals above so
+  // the cards can toggle between tokens and messages without recomputing
+  // anything client-side.
+  const promptsToday = prompts.filter(
+    (p) => Date.parse(p.ts) >= startOfTodayUTC,
+  ).length;
+  const promptsWeek = prompts.filter(
+    (p) => Date.parse(p.ts) >= sevenDaysAgo,
+  ).length;
+  const promptsAllTime = prompts.length;
+
   // --- Prompt counts per model / project. ---------------------------------
   // Prompts record session_id and cwd but not model. We approximate
   // "messages to model X" by: for each session, pick the model with the
@@ -170,6 +305,65 @@ function renderHtml(
     }
     messagesByProject.set(p.cwd, (messagesByProject.get(p.cwd) ?? 0) + 1);
   }
+
+  // --- Pre-grouped record/prompt indexes. ---------------------------------
+  // The dashboard renders a panel for every (range × model × project ×
+  // chart × metric) combination. Without indexes, each panel re-scans the
+  // full records array twice (once per filter), which becomes the
+  // dominant cost when the cross-product is hundreds of panels deep. The
+  // maps below let buildPanel pick a record/prompt subset in O(1)
+  // instead of O(N).
+  //
+  // The intersection key uses "\x1f" (ASCII unit separator) as a
+  // delimiter so it can't ever collide with a real model name or path.
+  const SEP = "\x1f";
+  const recordsByModel = new Map<string, typeof records>();
+  const recordsByProject = new Map<string, typeof records>();
+  const recordsByModelProject = new Map<string, typeof records>();
+  for (const rec of records) {
+    let arr = recordsByModel.get(rec.model);
+    if (!arr) { arr = []; recordsByModel.set(rec.model, arr); }
+    arr.push(rec);
+
+    arr = recordsByProject.get(rec.cwd);
+    if (!arr) { arr = []; recordsByProject.set(rec.cwd, arr); }
+    arr.push(rec);
+
+    const xKey = rec.model + SEP + rec.cwd;
+    arr = recordsByModelProject.get(xKey);
+    if (!arr) { arr = []; recordsByModelProject.set(xKey, arr); }
+    arr.push(rec);
+  }
+  // Same idea for prompts. Prompts don't carry a model field, so the
+  // model-aware indexes use primaryModelBySession to attribute each
+  // prompt to a model — same heuristic as messagesByModel above.
+  const promptsByProject = new Map<string, typeof prompts>();
+  const promptsByModel = new Map<string, typeof prompts>();
+  const promptsByModelProject = new Map<string, typeof prompts>();
+  for (const p of prompts) {
+    let arr = promptsByProject.get(p.cwd);
+    if (!arr) { arr = []; promptsByProject.set(p.cwd, arr); }
+    arr.push(p);
+
+    const m = primaryModelBySession.get(p.session_id);
+    if (m) {
+      arr = promptsByModel.get(m);
+      if (!arr) { arr = []; promptsByModel.set(m, arr); }
+      arr.push(p);
+
+      const xKey = m + SEP + p.cwd;
+      arr = promptsByModelProject.get(xKey);
+      if (!arr) { arr = []; promptsByModelProject.set(xKey, arr); }
+      arr.push(p);
+    }
+  }
+  // Set of (model, project) pairs that actually have data — used to
+  // skip empty intersection panels in the cross-product loop. Both
+  // records and prompts contribute, so a project with zero token records
+  // but a few prompts (e.g. interrupted sessions) still gets a panel.
+  const nonEmptyIntersections = new Set<string>();
+  for (const k of recordsByModelProject.keys()) nonEmptyIntersections.add(k);
+  for (const k of promptsByModelProject.keys()) nonEmptyIntersections.add(k);
 
   // --- Headline counts. ---------------------------------------------------
   // "API calls" = one per assistant response in the transcript. Each tool-use
@@ -331,31 +525,45 @@ function renderHtml(
     metric: (typeof metrics)[number],
   ): string => {
     // Tokens: sum total_tokens per day from filtered records. Messages:
-    // count prompts per day. Both respect the model filter (via primary
-    // model per session for prompts) and the project filter. All chart
-    // types (bars/line/heatmap) share the same data window — driven by
-    // the timeframe selector.
+    // count prompts per day. We pick the right pre-built subset via the
+    // record/prompt indexes (O(1)) instead of re-filtering the full
+    // arrays per panel. Same data window for all chart types — driven
+    // by the timeframe selector.
     let byDay: Map<string, number>;
     if (metric === "tokens") {
-      let filtered = records;
-      if (m !== ALL_MODELS) filtered = filtered.filter((rec) => rec.model === m);
-      if (pk !== ALL_PROJECTS) filtered = filtered.filter((rec) => rec.cwd === pk);
-      const s = summarize(filtered, {
+      let scope: typeof records;
+      if (m === ALL_MODELS && pk === ALL_PROJECTS) {
+        scope = records;
+      } else if (m === ALL_MODELS) {
+        scope = recordsByProject.get(pk) ?? [];
+      } else if (pk === ALL_PROJECTS) {
+        scope = recordsByModel.get(m) ?? [];
+      } else {
+        scope = recordsByModelProject.get(m + SEP + pk) ?? [];
+      }
+      const s = summarize(scope, {
         groupBy: "day",
         since: new Date(r.startMs),
         localTime,
       });
       byDay = new Map(s.groups.map((g) => [g.key, g.totals.total_tokens]));
     } else {
+      // Pick the prompt subset the same way; then walk it once instead
+      // of the full prompts array.
+      let scope: typeof prompts;
+      if (m === ALL_MODELS && pk === ALL_PROJECTS) {
+        scope = prompts;
+      } else if (m === ALL_MODELS) {
+        scope = promptsByProject.get(pk) ?? [];
+      } else if (pk === ALL_PROJECTS) {
+        scope = promptsByModel.get(m) ?? [];
+      } else {
+        scope = promptsByModelProject.get(m + SEP + pk) ?? [];
+      }
       byDay = new Map();
-      for (const p of prompts) {
+      for (const p of scope) {
         const ts = Date.parse(p.ts);
         if (ts < r.startMs) continue;
-        if (m !== ALL_MODELS) {
-          const primary = primaryModelBySession.get(p.session_id);
-          if (primary !== m) continue;
-        }
-        if (pk !== ALL_PROJECTS && p.cwd !== pk) continue;
         // dayKey honors localTime so message-day buckets line up with the
         // token-day buckets summarize() produces above.
         const day = dayKey(ts, localTime);
@@ -388,19 +596,30 @@ function renderHtml(
     return `<div class="chart-panel${hidden}" data-range="${r.id}" data-model="${escape(m)}" data-project="${escape(pk)}" data-chart="${c}" data-metric="${metric}">${svg}</div>`;
   };
 
-  // Pre-render every (range × model × project × chart × metric)
-  // combination. Both modelKeys and projectKeys include the "all"
-  // sentinel, so this covers every legal dropdown state including the
-  // intersections (e.g. "Opus, in /home/mann/token-count").
-  // Panel count grows as ranges * (M+1) * (P+1) * charts * metrics —
-  // each panel is a small SVG so this stays cheap into the low
-  // thousands; if a future user has hundreds of projects we can revisit
-  // and emit only non-empty intersections instead.
+  // Pre-render panel combinations. The single-filter rows always emit:
+  //   - (ALL × ALL):           1 baseline panel set
+  //   - (specific × ALL):      one set per known model
+  //   - (ALL × specific):      one set per known project
+  // Specific × specific intersections only emit when the user actually
+  // has data for that pair — the typical user has touched 5–10 of the
+  // M*P possible combinations, so this skips the vast majority of empty
+  // panels and keeps the DOM size proportional to real activity rather
+  // than to the cross-product size.
   const projectKeys = [ALL_PROJECTS, ...projectList];
   const panelParts: string[] = [];
   for (const r of ranges) {
     for (const m of modelKeys) {
       for (const pk of projectKeys) {
+        // Skip empty (specific model × specific project) intersections.
+        // Single-filter rows always emit so the most common paths
+        // through the UI never show a blank state.
+        if (
+          m !== ALL_MODELS &&
+          pk !== ALL_PROJECTS &&
+          !nonEmptyIntersections.has(m + SEP + pk)
+        ) {
+          continue;
+        }
         for (const c of chartTypes) {
           for (const metric of metrics) {
             panelParts.push(buildPanel(r, m, pk, c, metric));
@@ -454,6 +673,35 @@ function renderHtml(
     border-radius: 6px;
     min-width: 140px;
   }
+  /* Clickable summary cards. The whole card is the click target so a
+     subtle hover highlight + cursor: pointer makes the affordance
+     discoverable without adding visual noise. */
+  .totals .card.clickable { cursor: pointer; transition: background 0.12s, border-color 0.12s; }
+  .totals .card.clickable:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.04));
+    border-color: var(--tc-accent);
+  }
+  /* Show the focus outline only for keyboard focus (Tab/Enter/Space)
+     so mouse clicks don't leave a sticky blue border after the toggle.
+     :focus-visible is the standard knob for this. */
+  .totals .card.clickable:focus { outline: none; }
+  .totals .card.clickable:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: -1px;
+  }
+  /* Metric toggle: the parent .totals carries data-metric="tokens" or
+     "messages" and we hide whichever <span> is the inactive metric. The
+     two spans live side-by-side in the markup so swapping is a pure CSS
+     visibility change — no innerText rewriting needed. */
+  .totals[data-metric="tokens"] .metric-messages { display: none; }
+  .totals[data-metric="messages"] .metric-tokens { display: none; }
+  /* Compact / full number swap. Each value is rendered both ways
+     ("43,971,619" + "44M"); the full version is visible by default,
+     the compact one shows on hover. Lets the user glance for a magnitude
+     without losing the exact figure in the default view. */
+  .totals .card .num-compact { display: none; }
+  .totals .card.clickable:hover .num-full { display: none; }
+  .totals .card.clickable:hover .num-compact { display: inline; }
   .card .label { font-size: 12px; opacity: 0.7; }
   .card .value { font-size: 24px; margin-top: 4px; }
   table { border-collapse: collapse; width: 100%; margin-top: 8px; }
@@ -602,6 +850,20 @@ function renderHtml(
     outline-offset: -1px;
   }
   .chart-panel.hidden { display: none; }
+  /* Empty-state placeholder when the user picks an unused (model × project)
+     combination. We don't pre-render panels for empty intersections so the
+     normal "all panels hidden" state would otherwise look broken; this
+     gives the user a clear, actionable message. */
+  .chart-empty {
+    padding: 32px 16px;
+    text-align: center;
+    opacity: 0.7;
+    background: var(--vscode-editorWidget-background);
+    border: 1px dashed var(--vscode-editorWidget-border);
+    border-radius: 6px;
+    margin: 12px 0;
+  }
+  .chart-empty.hidden { display: none; }
 
   /* Segmented toggle for chart type. Two buttons rendered side-by-side with
      shared borders so they read as one control; the active one fills with
@@ -785,10 +1047,10 @@ function renderHtml(
 <body>
   <h1>Token Count<span class="live-dot" title="Live — auto-refreshes as you use Claude Code" aria-hidden="true"></span></h1>
   ${records.length === 0 ? `<p class="empty">No usage recorded yet. Start a Claude Code session — records show up here automatically.</p>` : ""}
-  <div class="totals">
-    ${totalCard("Today", today.totals)}
-    ${totalCard("Last 7 days", week.totals)}
-    ${totalCard("All time", allTime.totals)}
+  <div class="totals" id="totals" data-metric="tokens">
+    ${totalCard("Today", today.totals, promptsToday)}
+    ${totalCard("Last 7 days", week.totals, promptsWeek)}
+    ${totalCard("All time", allTime.totals, promptsAllTime)}
   </div>
 
   <div class="stats">
@@ -810,6 +1072,11 @@ function renderHtml(
     <span class="toggle-group" role="group" aria-label="Metric" id="metric-toggle">${metricToggle}</span>
   </div>
   ${panels}
+  <!-- Fallback shown when the user's filter combination has no
+       pre-rendered panel — i.e. they picked a (model × project) pair
+       they've never used together. Stays hidden by default; the JS
+       update() function flips it on whenever no chart-panel matches. -->
+  <div id="chart-empty" class="chart-empty hidden">No data for this combination — try a different model or project.</div>
   <div id="chart-tooltip" role="tooltip" aria-hidden="true"></div>
 
   <h2 id="by-model">By model</h2>
@@ -863,12 +1130,17 @@ function renderHtml(
           li.classList.toggle("highlighted", !!match);
         });
       }
+      // Empty-state element that appears when no panel matches (i.e.
+      // user picked an unused (model × project) combination — those
+      // intersections aren't pre-rendered as a perf win).
+      const emptyState = document.getElementById("chart-empty");
       function update() {
         const r = rangeSel.value;
         const m = modelSel.value;
         const pj = projectSel.value;
         const c = activeValue(chartBtns, "data-chart", "heatmap");
         const metric = activeValue(metricBtns, "data-metric", "tokens");
+        let anyMatch = false;
         panels.forEach(function (p) {
           const match =
             p.getAttribute("data-range") === r &&
@@ -876,8 +1148,10 @@ function renderHtml(
             p.getAttribute("data-project") === pj &&
             p.getAttribute("data-chart") === c &&
             p.getAttribute("data-metric") === metric;
+          if (match) anyMatch = true;
           p.classList.toggle("hidden", !match);
         });
+        if (emptyState) emptyState.classList.toggle("hidden", anyMatch);
         // Pie highlight follows the project filter: reflect the current
         // project selection on the pies so the two views stay in sync.
         highlightPie(pj !== ALL ? pj : null);
@@ -1001,6 +1275,33 @@ function renderHtml(
       });
     })();
 
+    // Summary cards (Today / Last 7 days / All time): clicking any card
+    // flips all three between the tokens view and the messages view.
+    // Both numbers are pre-rendered inside each card; CSS picks which
+    // span is visible based on data-metric on the parent #totals.
+    (function () {
+      const totals = document.getElementById("totals");
+      if (!totals) return;
+      const cards = totals.querySelectorAll(".card.clickable");
+      const flip = function () {
+        const next = totals.getAttribute("data-metric") === "tokens"
+          ? "messages"
+          : "tokens";
+        totals.setAttribute("data-metric", next);
+      };
+      cards.forEach(function (card) {
+        card.addEventListener("click", flip);
+        // Keyboard parity with the role="button" semantics — Enter or
+        // Space should activate the card just like a click does.
+        card.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            flip();
+          }
+        });
+      });
+    })();
+
     // Project pie: Tokens/Messages toggle. Flips the .hidden class between
     // the two pre-rendered <div class="pie-panel"> variants.
     (function () {
@@ -1118,8 +1419,39 @@ function renderHtml(
 </html>`;
 }
 
-function totalCard(label: string, t: TotalsBlock): string {
-  return `<div class="card"><div class="label">${escape(label)}</div><div class="value">${formatNumber(t.total_tokens)}</div><div class="label">tokens</div></div>`;
+/**
+ * One summary card. Renders both the token total and the message count;
+ * a CSS class on the parent `.totals` flips which set is visible. The
+ * card itself doesn't know which metric is "active" — that's owned by
+ * the click handler in the page-level script.
+ *
+ * Each value is also rendered twice: the full format (`43,971,619`) and
+ * a compact form (`44M`). CSS swaps to the compact form on hover so the
+ * user can quickly eyeball orders of magnitude without losing the
+ * exact number in the default view.
+ */
+function totalCard(label: string, t: TotalsBlock, messages: number): string {
+  const tokensFull = formatNumber(t.total_tokens);
+  const tokensCompact = formatCompact(t.total_tokens);
+  const msgsFull = formatNumber(messages);
+  const msgsCompact = formatCompact(messages);
+  return `<div class="card clickable" role="button" tabindex="0" aria-label="${escape(label)} — click to toggle tokens / messages">
+    <div class="label">${escape(label)}</div>
+    <div class="value">
+      <span class="metric-tokens">
+        <span class="num-full">${tokensFull}</span>
+        <span class="num-compact">${tokensCompact}</span>
+      </span>
+      <span class="metric-messages">
+        <span class="num-full">${msgsFull}</span>
+        <span class="num-compact">${msgsCompact}</span>
+      </span>
+    </div>
+    <div class="label">
+      <span class="metric-tokens">tokens</span>
+      <span class="metric-messages">messages</span>
+    </div>
+  </div>`;
 }
 
 // One label/value pair in the compact stats row. `tooltip` is optional — when
@@ -1965,6 +2297,93 @@ function renderError(err: unknown): string {
     <h2>Token Count: error reading usage.jsonl</h2>
     <pre>${escape(msg)}</pre>
   </body></html>`;
+}
+
+/**
+ * Loading screen shown briefly on a cache miss while we read the data
+ * files and rebuild the HTML. Each render picks a random tagline so
+ * users who open the dashboard often see a little variety. Pure static
+ * HTML — no JS — so it paints as soon as the webview receives it.
+ */
+function renderLoading(): string {
+  // Short, on-brand quips. Keep them cheeky and self-aware about what
+  // the tool is actually doing under the hood. Roughly 6-8 words each
+  // so they fit on one line in a narrow webview.
+  const quotes = [
+    "Counting your tokens, one cache read at a time…",
+    "Tallying turns and tokens…",
+    "Reading transcripts so you don't have to…",
+    "Drawing little orange squares…",
+    "Bucketing days at local midnight…",
+    "Following the prompt cache trail…",
+    "Where did all those tokens go?",
+    "Translating turns into numbers…",
+    "Re-counting your conversations with Claude…",
+    "Summing input, output, and cache reads…",
+    "Looking up every cwd you've worked in…",
+  ];
+  const quote = quotes[Math.floor(Math.random() * quotes.length)]!;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<title>Token Count</title>
+<style>
+  /* Centered, full-viewport loader. The three orange dots pulse on a
+     stagger so the animation reads as motion, not flicker. The accent
+     hex is hard-coded here (rather than via the --tc-accent variable
+     used elsewhere) because this loading screen is its own self-
+     contained HTML doc — it doesn't share the main dashboard's :root
+     custom properties. */
+  body {
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .loading-dots { display: flex; gap: 10px; }
+  .loading-dots span {
+    width: 12px;
+    height: 12px;
+    background: #D97757;
+    border-radius: 50%;
+    display: inline-block;
+    animation: tc-pulse 1.4s infinite ease-in-out both;
+  }
+  /* Negative delays so the first dot is already mid-pulse when the
+     animation starts, instead of all three sitting still at t=0. */
+  .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+  .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+  .loading-dots span:nth-child(3) { animation-delay:  0s;   }
+  @keyframes tc-pulse {
+    0%, 80%, 100% { transform: scale(0.65); opacity: 0.35; }
+    40%           { transform: scale(1);    opacity: 1;    }
+  }
+  .quote {
+    font-size: 13px;
+    font-style: italic;
+    opacity: 0.7;
+    max-width: 360px;
+    text-align: center;
+    padding: 0 16px;
+  }
+</style>
+</head>
+<body>
+  <div class="loading-dots" aria-label="Loading">
+    <span></span><span></span><span></span>
+  </div>
+  <div class="quote">${escape(quote)}</div>
+</body>
+</html>`;
 }
 
 // Very small HTML escaper. We never insert user content outside of text

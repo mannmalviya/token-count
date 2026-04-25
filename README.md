@@ -203,8 +203,12 @@ whenever the hook appends a record.
     stats row (user messages, msgs/day, sessions, projects, models, active
     days, first-recorded date).
   - A time-series chart with a timeframe dropdown (past week / month /
-    year / all-time), a model filter, a project filter, a **Bars/Line**
-    toggle, and a **Tokens/Messages** toggle. All combinations are
+    year / all-time), a model filter, a project filter, a chart-type
+    toggle (**Heatmap** GitHub-style calendar grid in Claude orange —
+    the default — plus **Bars** and **Line**), and a
+    **Tokens/Messages** toggle. The model and project filters are
+    independent and combine; an empty (model × project) intersection
+    shows a friendly placeholder. All filter combinations with data are
     pre-rendered, so switching is instant.
   - A "By model" table that's sortable on any column (click a header to
     toggle descending/ascending) and whose rows are clickable — clicking

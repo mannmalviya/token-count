@@ -530,6 +530,20 @@ function renderHtml(
     font-size: 10px;
     opacity: 0.6;
   }
+  /* Multi-year heatmap stack. Each year is a wrapper with a heading
+     above the SVG; spacing between wrappers separates the year-grids. */
+  .hm-year {
+    margin-top: 16px;
+  }
+  .hm-year:first-child {
+    margin-top: 0;
+  }
+  .hm-year-label {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    opacity: 0.85;
+  }
 
   /* Custom hover tooltip. Positioned with inline JS so it tracks the mouse.
      Kept hidden by default; shown when the .visible class is set. */
@@ -1303,7 +1317,41 @@ function renderBarChart(
   if (bucketDays === 1 && days.length <= 31) {
     // One weekday label per day (only meaningful for daily buckets).
     labels = days.map((d, i) => xLabel(i, weekdayOf(d.key))).join("");
+  } else if (bucketDays > 1) {
+    // Multi-day buckets (today only the "Past year" view, which uses
+    // weekly buckets). Label each month boundary with the month name.
+    // Two-pass approach: (1) collect every month-start index, (2) drop
+    // labels that would overlap a neighbor. The overlap case fires
+    // when the year window starts late in a month — "Apr" lands on
+    // bucket 0, "May" on bucket 1, only ~one bar-width apart, and the
+    // text needs ~3 bar-widths to not collide.
+    const candidates: number[] = [];
+    let lastMonth = "";
+    for (let i = 0; i < days.length; i += 1) {
+      const month = days[i]!.key.slice(5, 7);
+      if (month !== lastMonth) {
+        lastMonth = month;
+        candidates.push(i);
+      }
+    }
+    const filtered: number[] = [];
+    const minBucketSpacing = Math.max(2, Math.ceil(28 / barW));
+    for (const i of candidates) {
+      if (
+        filtered.length > 0 &&
+        i - filtered[filtered.length - 1]! < minBucketSpacing
+      ) {
+        // Drop the earlier label (replace with the later one) so the
+        // partial leading-month doesn't squish against its neighbor.
+        filtered.pop();
+      }
+      filtered.push(i);
+    }
+    labels = filtered
+      .map((i) => xLabel(i, monthShortFromKey(days[i]!.key)))
+      .join("");
   } else {
+    // Daily buckets, > 31 days (e.g. "All time" with lots of history).
     // Pick a stride so labels sit ~60px apart; always include first + last.
     const stride = Math.max(1, Math.ceil(60 / barW));
     const indices = new Set<number>();
@@ -1434,6 +1482,35 @@ function renderLineChart(
   let labels = "";
   if (bucketDays === 1 && days.length <= 31) {
     labels = days.map((d, i) => xLabel(i, weekdayOf(d.key))).join("");
+  } else if (bucketDays > 1) {
+    // Year view (weekly buckets): one label per month boundary, using
+    // the month's short name. Mirrors renderBarChart so swapping chart
+    // types keeps the same x-axis scheme — including the overlap
+    // filter that drops a partial leading-month label when it would
+    // squish against its neighbor.
+    const candidates: number[] = [];
+    let lastMonth = "";
+    for (let i = 0; i < days.length; i += 1) {
+      const month = days[i]!.key.slice(5, 7);
+      if (month !== lastMonth) {
+        lastMonth = month;
+        candidates.push(i);
+      }
+    }
+    const filtered: number[] = [];
+    const minBucketSpacing = Math.max(2, Math.ceil(28 / colW));
+    for (const i of candidates) {
+      if (
+        filtered.length > 0 &&
+        i - filtered[filtered.length - 1]! < minBucketSpacing
+      ) {
+        filtered.pop();
+      }
+      filtered.push(i);
+    }
+    labels = filtered
+      .map((i) => xLabel(i, monthShortFromKey(days[i]!.key)))
+      .join("");
   } else {
     const stride = Math.max(1, Math.ceil(60 / colW));
     const indices = new Set<number>();
@@ -1484,13 +1561,21 @@ function renderLineChart(
  * Each cell is tinted by how much activity (tokens or messages) happened
  * that day, on a 5-step scale of the Claude orange accent.
  *
- * This renderer is daily-only on purpose: a heatmap of weekly buckets
- * defeats the visual point, so we ignore the bucketDays the bar/line
- * charts use for the "year" view and walk the range one day at a time.
+ * This is a dispatcher: when the data window fits within roughly one
+ * year (≤ 53 weeks), it renders one continuous grid. When it exceeds
+ * that — e.g. "All time" for a user with 2+ years of history — it
+ * matches GitHub's behavior and emits one fixed-size grid per calendar
+ * year, stacked vertically with a year heading. Splitting prevents the
+ * single-grid path from clamping cells below the 8px minimum and
+ * overflowing the 900px viewBox at multi-year scales.
  *
- * Data shape: `byDay` is keyed by UTC ISO date string ("YYYY-MM-DD"),
- * same as the input to renderBarChart. We look each day up directly;
- * missing days fall back to 0 (which renders as the empty bucket).
+ * Color bucketing uses a single global max across all years so a busy
+ * day in one year reads visually heavier than a quiet day in another —
+ * lets you compare years at a glance.
+ *
+ * Data shape: `byDay` is keyed by ISO date string ("YYYY-MM-DD"). We
+ * look each day up directly; missing days fall back to 0 (the empty
+ * bucket).
  */
 function renderHeatmap(
   byDay: Map<string, number>,
@@ -1498,6 +1583,71 @@ function renderHeatmap(
   endMs: number,
   unit: string = "tokens",
   localTime: boolean = false,
+): string {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  // Dispatch: single grid vs multi-year stack. 371 days = 53 weeks +
+  // change, which keeps "Past year" (365 days) on the single-grid path
+  // even when the window crosses a Jan 1 boundary, while "All time"
+  // with multi-year history goes through the splitter.
+  const totalDays = (endMs - startMs) / DAY_MS;
+  if (totalDays <= 371) {
+    return renderHeatmapGrid(byDay, startMs, endMs, unit, localTime);
+  }
+
+  // Compute global dayMax once so all year-grids share a color scale.
+  let globalMax = 0;
+  for (const v of byDay.values()) if (v > globalMax) globalMax = v;
+
+  // Walk calendar years from latest → earliest. Most-recent first puts
+  // the year you most likely care about at the top, so users don't
+  // scroll past old years to see today's activity.
+  const firstYear = localTime
+    ? new Date(startMs).getFullYear()
+    : new Date(startMs).getUTCFullYear();
+  const lastYear = localTime
+    ? new Date(endMs).getFullYear()
+    : new Date(endMs).getUTCFullYear();
+
+  const sections: string[] = [];
+  for (let y = lastYear; y >= firstYear; y -= 1) {
+    // Calendar-year bounds, in the chosen timezone. The end-of-year
+    // is Dec 31 23:59:59 so the last day's grid cell renders.
+    const yearStart = localTime
+      ? new Date(y, 0, 1).getTime()
+      : Date.UTC(y, 0, 1);
+    const yearEnd = localTime
+      ? new Date(y, 11, 31, 23, 59, 59, 999).getTime()
+      : Date.UTC(y, 11, 31, 23, 59, 59, 999);
+
+    // Clamp to the actual data window. The first year may start
+    // mid-year (user started using the tool then); the last year ends
+    // at "today" rather than Dec 31 (no future cells, GitHub-style).
+    const segStart = Math.max(yearStart, startMs);
+    const segEnd = Math.min(yearEnd, endMs);
+
+    const grid = renderHeatmapGrid(byDay, segStart, segEnd, unit, localTime, globalMax);
+    sections.push(
+      `<div class="hm-year"><div class="hm-year-label">${y}</div>${grid}</div>`,
+    );
+  }
+
+  return sections.join("");
+}
+
+/**
+ * Render one calendar grid. Used directly for windows ≤ 1 year, and as
+ * the per-year building block for multi-year stacks. `dayMaxOverride`,
+ * when set, replaces the locally-computed max so multiple grids in a
+ * stack share a single color scale.
+ */
+function renderHeatmapGrid(
+  byDay: Map<string, number>,
+  startMs: number,
+  endMs: number,
+  unit: string = "tokens",
+  localTime: boolean = false,
+  dayMaxOverride?: number,
 ): string {
   const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -1536,8 +1686,13 @@ function renderHeatmap(
   // hottest day always lands in bucket 4 — this matches user intuition
   // ("darkest = highest"). Quantile-based bucketing would smooth out
   // outliers but lose the "this was your peak day" signal we want here.
-  let dayMax = 0;
-  for (const v of byDay.values()) if (v > dayMax) dayMax = v;
+  // When called from the multi-year splitter, dayMaxOverride forces the
+  // same scale across every year-grid so a busy day in one year reads
+  // heavier than a quiet day in another.
+  let dayMax = dayMaxOverride ?? 0;
+  if (dayMaxOverride === undefined) {
+    for (const v of byDay.values()) if (v > dayMax) dayMax = v;
+  }
   const fillFor = (v: number): string => {
     if (v <= 0 || dayMax === 0) return "var(--tc-heatmap-0)";
     const frac = v / dayMax;
@@ -1779,6 +1934,21 @@ function niceCeil(n: number): number {
   const steps = [1, 1.5, 2, 3, 4, 5, 6, 8, 10];
   const nice = steps.find((s) => d <= s) ?? 10;
   return nice * pow;
+}
+
+/**
+ * Pull a 3-letter month name out of a "YYYY-MM-DD" day key. Used by the
+ * year-view x-axis, where we want "Apr"/"May"/... instead of MM-DD.
+ * Reading from the key string keeps us out of any TZ re-parsing — the
+ * key was canonicalized when the bucket was built.
+ */
+function monthShortFromKey(key: string): string {
+  const MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const m = parseInt(key.slice(5, 7), 10);
+  return MONTHS[m - 1] ?? "";
 }
 
 /** Short human-readable number for axis labels. 1_234_567 → "1.2M". */

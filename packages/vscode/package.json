@@ -2,9 +2,27 @@
   "name": "token-count-vscode",
   "displayName": "Token Count",
   "description": "Live Claude Code token usage in the status bar + a dashboard.",
-  "version": "0.0.0",
-  "private": true,
-  "publisher": "token-count-local",
+  "version": "0.1.0",
+  "publisher": "MannMalviya",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mannmalviya/token-count.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mannmalviya/token-count/issues"
+  },
+  "homepage": "https://github.com/mannmalviya/token-count#readme",
+  "icon": "resources/icon.png",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "tokens",
+    "usage",
+    "dashboard",
+    "cost"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -53,7 +71,7 @@
       }
     }
   },
-  "categories": ["Other"],
+  "categories": ["Visualization", "Other"],
   "scripts": {
     "build": "node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch",

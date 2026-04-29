@@ -1,0 +1,19 @@
+# Source files — the extension is bundled into dist/ by esbuild.
+src/**
+tests/**
+
+# Build config (not needed at runtime).
+esbuild.config.mjs
+tsconfig.json
+**/*.tsbuildinfo
+
+# Dev artifacts.
+node_modules/**
+.vscode/**
+
+# Source SVG used to generate icon.png — the PNG is what ships.
+resources/icon-marketplace.svg
+
+# Git/editor metadata.
+.gitignore
+.vscodeignore
